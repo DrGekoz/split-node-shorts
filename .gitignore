@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Secrets - NEVER commit
+.env
+client_secret_*.json
+*.credentials.json
+.higgsfield_auth.log
+higgsfield_auth.log
+
+# Generated output (shorts)
+shots/
+rendered_audio/
+rendered_video/
+thumbnails/
+
+# State tracking
+.used_shorts.json
+.rejected_shorts.json
+.resume_state.json
+.short_counter
+.video_price_state.json
+
+# Test / debug artifacts
+test_output/
+upscale_bench.py
+
+# Real-person likeness photos (privacy/copyright - never commit)
+cast_refs/real/
