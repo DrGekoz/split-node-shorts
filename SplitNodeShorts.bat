@@ -36,18 +36,10 @@ echo [CHECK] LM Studio (port 1234)...
 curl -s -o nul http://localhost:1234/v1/models 2>nul
 if %errorlevel% neq 0 (
     echo [WARN] LM Studio not running on port 1234
-    echo        Start LM Studio first (load gemma-4-e4b-uncensored), then re-run.
+    echo        Start LM Studio first, then re-run this.
     pause
 ) else (
     echo [OK] LM Studio ready
-)
-
-echo [CHECK] Higgsfield CLI...
-higgsfield account status >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [WARN] Higgsfield not authenticated - run: higgsfield auth login
-) else (
-    echo [OK] Higgsfield ready
 )
 
 echo.

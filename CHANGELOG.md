@@ -2,6 +2,25 @@
 
 All notable changes to Split Node Shorts.
 
+## [1.0.1] - 2026-08-11
+
+### Fix: launcher closed immediately / died at the LM Studio check
+
+- **Root cause 1 (immediate close):** the `.bat` was written with **LF-only line
+  endings**. `cmd.exe` needs CRLF for multi-line parenthesized `if (...)` blocks,
+  so the first `if %errorlevel% ... ( ) else ( )` block aborted the whole script.
+- **Root cause 2 ("then was unexpected at this time"):** the LM Studio check's
+  WARN `echo` line contained a literal `(load gemma-4-e4b-uncensored)` inside the
+  parenthesized block. cmd parsed the `(` as opening an inner block, then choked
+  on `then`. Removed the parentheses from the echo text.
+- **Root cause 3 (hang at Higgsfield check):** `higgsfield account status >nul 2>&1`
+  hung when run as a bat line (interaction between the `.cmd` shim and the null
+  redirect). Removed the check — it was redundant, since `split_node_shorts.py`
+  invokes Higgsfield itself with proper error handling.
+- Verified end-to-end: checks pass (Python / PocketTTS / LM Studio), RSS scan
+  finds candidates, pipeline reaches the story pick, and the window pauses at the
+  end instead of closing.
+
 ## [1.0.0] - 2026-08-11
 
 ### Initial release
