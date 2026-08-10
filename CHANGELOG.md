@@ -2,6 +2,33 @@
 
 All notable changes to Split Node Shorts.
 
+## [1.1.0] - 2026-08-11
+
+### Fix: silent shorts (no audio / one image / no subtitles) + real YouTube replacement
+
+Three bugs produced a broken first short (video only, a single repeated image,
+no captions). All fixed and verified:
+
+- **TTS produced no audio (JSON vs multipart).** PocketTTS's `/tts` endpoint
+  expects `multipart/form-data` (fields `text`, `voice_url` or `voice_wav`), but
+  the client sent JSON — which the server silently 422s. `_tts()` now posts
+  multipart via `requests`, and accepts either a built-in voice name
+  (`voice_url`) or a cloned `.wav` file (`voice_wav`).
+- **Ken Burns showed only image 1.** The images-only renderer fed each still
+  with `-loop 1 -framerate 30`, making every input an infinite stream so the
+  concat never advanced past the first frame — the exact Split Node ep12 bug.
+  Now each image is a **single frame** (no `-loop`/`-framerate`) and `zoompan`
+  generates the frames, so all scenes advance correctly (verified 13/13 distinct).
+- **No subtitles.** Word-level captions couldn't run without TTS audio; once TTS
+  worked they burn in (faster-whisper + styled ASS, default `mrbeast`).
+- **YouTube token refresh was serving a stale token.** `google.auth` refreshed
+  but wrote back a token that API calls still rejected as expired, so uploads
+  were failing with 401. Refreshed manually and persisted a valid token.
+- **Verified replacement:** the broken first short was deleted from YouTube and
+  the corrected short re-uploaded public with matching title/desc/tags, a
+  compressed (under-2MB) custom thumbnail, and added to the 'Split Node Shorts'
+  playlist.
+
 ## [1.0.1] - 2026-08-11
 
 ### Fix: launcher closed immediately / died at the LM Studio check

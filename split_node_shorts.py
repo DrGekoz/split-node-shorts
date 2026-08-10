@@ -668,16 +668,32 @@ def _generate_video(start_image, prompt, duration):
 
 # ---- TTS ------------------------------------------------------------
 def _tts(text, out_path):
-    """PocketTTS narration (voice_url built-in voice)."""
+    """PocketTTS narration via multipart/form-data (the /tts endpoint expects
+    multipart, NOT JSON — a JSON POST silently 422s and produces no audio).
+    TTS_VOICE is a built-in catalog voice name sent as voice_url, or a cloned
+    .wav file path sent as voice_wav."""
     try:
-        payload = {"text": text, "voice_url": TTS_VOICE}
-        req = urllib.request.Request(
-            f"{POCKET_TTS_URL}/tts",
-            data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=180) as r:
-            with open(out_path, "wb") as f:
-                shutil.copyfileobj(r, f)
+        import requests
+        # multipart form fields: text (required), voice_url (built-in name) or
+        # voice_wav (cloned clip file)
+        data = {"text": text}
+        files = {}
+        if os.path.isfile(str(TTS_VOICE)):
+            files["voice_wav"] = open(str(TTS_VOICE), "rb")
+        else:
+            data["voice_url"] = str(TTS_VOICE)
+        r = requests.post(f"{POCKET_TTS_URL}/tts", data=data, files=files,
+                          timeout=240)
+        for f in files.values():
+            try:
+                f.close()
+            except Exception:
+                pass
+        if r.status_code != 200:
+            print(f"  [TTS] HTTP {r.status_code}: {r.text[:200]}")
+            return False
+        with open(out_path, "wb") as f:
+            f.write(r.content)
         return os.path.getsize(out_path) > 1000
     except Exception as e:
         print(f"  [TTS] {e}")
@@ -710,7 +726,13 @@ def _render(shots, script_data, output_path):
     return ""
 
 def _render_kenburns(shots, imgs, output_path, total):
-    """Images-only: slow-zoom each still image to its TTS duration, concat, mux audio."""
+    """Images-only: slow-zoom each still image to its TTS duration, concat, mux audio.
+
+    Uses the Split Node single-pass pattern: each image is fed as a SINGLE frame
+    (no -loop/-framerate) and zoompan generates the d=N frames from that one
+    input. Adding -loop 1 makes every input infinite and the concat never
+    advances past image 1 (all later shots repeat frame 1) — the exact bug fixed
+    in Split Node ep12."""
     print("  [RENDER] images-only mode (Ken Burns slow-zoom)")
     OV_W, OV_H = W_RES * 2, H_RES * 2
     audio_in = _build_audio(shots)
@@ -723,8 +745,9 @@ def _render_kenburns(shots, imgs, output_path, total):
         dur = max(s.get("dur", 3), 0.5)
         n_frames = max(int(dur * 30), 30)
         zoom = f"z='if(eq(on,1),1,min(1+0.08*(on-1)/{max(n_frames-1,1)},1.08))'"
+        # single-frame input (no loop=1) + zoompan generates d=N frames
         parts.append(
-            f"[{len(valid_imgs)}:v]loop=1:size=1:start=0,"
+            f"[{len(valid_imgs)}:v]"
             f"scale={OV_W}:{OV_H}:flags=lanczos:force_original_aspect_ratio=increase,"
             f"crop={OV_W}:{OV_H},"
             f"zoompan={zoom}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
@@ -741,8 +764,9 @@ def _render_kenburns(shots, imgs, output_path, total):
     with open(graph_file, "w") as f:
         f.write(graph)
     cmd = ["ffmpeg", "-y"]
+    # single-frame image inputs - NO -loop / -framerate (the concat-advance bug)
     for p in valid_imgs:
-        cmd += ["-loop", "1", "-framerate", "30", "-i", p]
+        cmd += ["-i", p]
     audio_idx = len(valid_imgs)
     if audio_in and os.path.isfile(audio_in):
         cmd += ["-i", audio_in]

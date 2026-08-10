@@ -26,6 +26,10 @@ thumbnails/
 # Test / debug artifacts
 test_output/
 upscale_bench.py
+_describe.py
+_manual_build.py
+_replace_yt.py
+scene_descriptions.json
 
 # Real-person likeness photos (privacy/copyright - never commit)
 cast_refs/real/
