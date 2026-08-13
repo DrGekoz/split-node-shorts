@@ -1128,19 +1128,38 @@ def run():
     # Ping the live video-model price every run; surface a change if it moved.
     _check_video_price()
 
-    url, topic = _pick_story()
-    if not url:
+    # Pick a story AND resolve its article before committing. If the chosen
+    # article is blocked / returns no content (or the script can't be built),
+    # reject it and loop back to picking a different one instead of quitting
+    # (Joe 2026-08-14).
+    max_attempts = int(os.environ.get("STORY_RESOLVE_ATTEMPTS", "5"))
+    url, topic = "", ""
+    content = []
+    script = {}
+    for _attempt in range(1, max_attempts + 1):
+        url, topic = _pick_story()
+        if not url:
+            return
+        print(f"\n  [TOPIC] {topic}\n  [URL] {url}")
+        content = fetch_article_paragraphs(url)
+        if not content:
+            print(f"  [FAIL] Article did not resolve (blocked / no content): {url}")
+            print(f"  [RETRY] Picking a different story ({_attempt}/{max_attempts})...")
+            _save_rejected(url)
+            continue
+        content_text = "\n".join(content)
+        print("\n[BIBLE] Building Shorts script (6-phase formula)...")
+        script = _build_script(topic, url, content_text)
+        if script and script.get("scenes"):
+            break
+        print(f"  [FAIL] Could not build a script from this article ({url})")
+        print(f"  [RETRY] Picking a different story ({_attempt}/{max_attempts})...")
+        _save_rejected(url)
+        content = []
+    if not content or not script or not script.get("scenes"):
+        print(f"  [FAIL] Could not resolve + script a story after {max_attempts} attempts.")
         return
-
-    print(f"\n  [TOPIC] {topic}\n  [URL] {url}")
-    content = fetch_article_paragraphs(url)
     content_text = "\n".join(content)
-
-    print("\n[BIBLE] Building Shorts script (6-phase formula)...")
-    script = _build_script(topic, url, content_text)
-    if not script or not script.get("scenes"):
-        print("  [FAIL] Could not build script")
-        return
 
     scenes = script["scenes"]
     num = script.get("number", "")

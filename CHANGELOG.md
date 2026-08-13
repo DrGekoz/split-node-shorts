@@ -2,6 +2,17 @@
 
 All notable changes to Split Node Shorts.
 
+## [1.3.0] - 2026-08-14
+
+### Story resolve-and-retry (don't quit on a blocked article)
+
+Joe 2026-08-14. Previously, if a selected RSS article was blocked / dead /
+paywalled / returned no content, the pipeline quit. Now the story-pick step
+resolves the article up front: if it doesn't fetch, it's rejected (2-week
+cooldown) and the run loops back to picking a different story instead of
+exiting. Retries up to `STORY_RESOLVE_ATTEMPTS` (default 5). Also re-picks if
+the script LLM returns no scenes for a resolved article.
+
 ## [1.2.0] - 2026-08-14
 
 ### Up-to-scratch with Split Node (pipeline hardening, no render changes)
