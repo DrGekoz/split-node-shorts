@@ -148,6 +148,7 @@ Word-level animated captions burned into every short (faster-whisper word timing
 | `GENERATE_VIDEOS` | unset → **asks per run** · `1` = videos · `0` = images-only |
 | `SUBTITLE_STYLE` | `mrbeast` *(default)* · hormozi · karaoke · minimal · bounce · classic |
 | `STYLE` | `arcane` *(default)* · noir · photoreal · synthwave · + custom |
+| `IMAGE_CONCURRENCY` | concurrent scenes during image+TTS gen · `1` *(default, sequential)* · `3`+ to parallelise |
 
 ```bash
 GENERATE_VIDEOS=0 python split_node_shorts.py    # images-only (Ken Burns, cheap)

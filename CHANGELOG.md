@@ -2,6 +2,31 @@
 
 All notable changes to Split Node Shorts.
 
+## [1.2.0] - 2026-08-14
+
+### Up-to-scratch with Split Node (pipeline hardening, no render changes)
+
+Joe 2026-08-14. Ported the fixes from Split Node that translate to Shorts
+(which has no characters/faces, so the character-rendering fixes don't apply).
+Subtitles, audio and ffmpeg render are UNTOUCHED.
+
+- **Junk-paragraph filter.** `fetch_article_paragraphs` now drops boilerplate /
+  nav / promo / paywall / cookie-consent / byline noise via `_is_junk_paragraph`
+  (ported JUNK_PATTERNS), so only real story content reaches the script LLM.
+  Improves script factual quality.
+- **LLM liveness probe.** `_llm_reachable` now probes the CHAT endpoint (tiny
+  "hi" call, 8s timeout) instead of `/v1/models`. `/v1/models` can respond while
+  inference is hung, which let the gate pass and then block every subsequent LLM
+  call on a 180s timeout. Real liveness test = no more serial stalls.
+- **Hands/anatomy clause.** Stylized image models (Arcane) hallucinate fingers on
+  hand-visible scenes (clicking / typing / counting cash). `_scene_shows_hands`
+  detects those scenes and appends an anatomy-correct-hands clause to the image
+  prompt.
+- **Parallel image + TTS generation.** Each scene's image + TTS + duration are
+  fully independent, so they now render concurrently via a thread pool instead
+  of one-at-a-time. Gated by `IMAGE_CONCURRENCY` (default 1 = exactly the old
+  sequential behaviour, so nothing changes unless you opt in).
+
 ## [1.1.0] - 2026-08-11
 
 ### Fix: silent shorts (no audio / one image / no subtitles) + real YouTube replacement

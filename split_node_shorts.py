@@ -232,6 +232,23 @@ def add_custom_style(name: str, descriptor: str) -> bool:
     return True
 
 
+# Hands/anatomy hardening (ported from Split Node Bug 3, Joe 2026-08-14):
+# stylized image models (Arcane etc.) hallucinate hands/fingers on shots that
+# show them. When a scene's narration references hands/clicking/typing, append
+# an explicit anatomy-correct-hands clause so the model keeps fingers right.
+def _scene_shows_hands(text: str) -> bool:
+    t = (text or "").lower()
+    return bool(re.search(
+        r"\b(hand|hands|fingers|fingertips|click|clicking|clicks|typing|types|"
+        r"taps|tapping|presses|press|button|grab|grabbing|hold|holding|"
+        r"clutch|grip|writes|wrote|signs|signing|counts?|cash|stacks|fist)\b", t))
+
+def _hands_clause() -> str:
+    return (" Anatomy-correct hands: exactly five natural fingers per hand, "
+            "correct proportions, no extra, fused, webbed or claw-like fingers, "
+            "no deformed or misplaced digits.")
+
+
 # ---- LLM (gemma 4 uncensored via LM Studio) ------------------------
 def _llm_chat(messages, max_tokens=900, temp=0.8) -> str:
     data = json.dumps({
@@ -249,8 +266,19 @@ def _llm_chat(messages, max_tokens=900, temp=0.8) -> str:
         return ""
 
 def _llm_reachable() -> bool:
+    """Liveness probe of LM Studio (ported from Split Node 2026-08-09).
+
+    Probes the CHAT endpoint (NOT /v1/models) with a short timeout: /v1/models
+    can still respond while inference is dead/hung, which would let the gate
+    pass and then block on a 180s per-call timeout on every subsequent LLM call.
+    A tiny chat call is the real liveness test.
+    """
     try:
-        req = urllib.request.Request("http://localhost:1234/v1/models", method="GET")
+        _payload = {"model": LLM_MODEL,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 2, "temperature": 0.1}
+        req = urllib.request.Request(LM_STUDIO_URL, data=json.dumps(_payload).encode(),
+                                     headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=8) as r:
             return r.status == 200
     except Exception:
@@ -491,6 +519,51 @@ def _build_script(topic, article_url, content):
 
 
 # ---- article fetch --------------------------------------------------
+# Junk-paragraph filter ported from Split Node (Joe 2026-08-14): strips
+# boilerplate/nav/promo/paywall/consent noise from the article so only real
+# story content reaches the script LLM. Improves script factual quality.
+JUNK_PATTERNS = [
+    r'\b(cookie (policy|notice|consent|banner|preferences)|accept (all )?cookies|we use cookies)\b',
+    r'\bsubscribe\b', r'\bnewsletter\b', r'\bsign\s?up\b', r'\blog\s?in\b', r'\bsign\s?in\b',
+    r'\bcreate (a|an) (free )?account\b', r'\balready (have|a) (an )?account\b',
+    r'\b(privacy policy|terms of (service|use|conditions))\b',
+    r'\bsponsor(ed)?\s*(content|post|story)?\b', r'\badvertisement\b',
+    r'\b(related (articles?|stories?|posts?|content)|you might also like|you may also like|more (from|on|like this))\b',
+    r'\brecommended for you\b', r'\btrending (now|stories)?\b', r'\bmost (read|popular|viewed)\b',
+    r'\bread more\b', r'\bcontinue reading\b', r'\bshare (this|the) (article|story|post)\b',
+    r'\bfollow (us|her|him|them) on\b',
+    r'\b(download (the|our) app|get the app|available on (ios|android|the app store|google play))\b',
+    r'\b(unlimited access|digital access|subscription required|become a (member|subscriber)|already a subscriber|subscribe now)\b',
+    r'\b(paywall|premium (content|article|subscriber))\b',
+    r'\b(all rights reserved)\b', r'\b©\b', r'\bclick here\b',
+    r'\bopens? in a new (tab|window)\b', r'\b(contact us|send us a tip|email us|feedback|corrections?)\b',
+    r'\b(photo credits?|image credits?|credit:)\b', r'\b(editor\s?\'?s? note|disclosure)\b',
+]
+
+def _is_junk_paragraph(text: str) -> bool:
+    """Heuristic junk filter: boilerplate, nav, promo, ads, contact noise, bylines."""
+    low = text.lower()
+    if any(skip in low for skip in [
+        'url(', '.css', 'javascript', '{', ';}', 'no-repeat',
+        'margin:', 'padding:', 'border:', 'width:', 'height:'
+    ]):
+        return True
+    for pat in JUNK_PATTERNS:
+        if re.search(pat, low):
+            return True
+    if len(text) > 40 and text == text.upper():
+        return True
+    if re.match(r'^by\s+[A-Z][a-zA-Z\'\-\]+(\s+[A-Z][a-zA-Z\'\-\]+){0,3}\.?$', text):
+        return True
+    if re.search(r'\bis (a|an|the)?\s*(staff|senior|contributing|freelance|award-winning)?\s*(writer|reporter|journalist|editor|correspondent|columnist)\s+(at|for|with)\b', low):
+        return True
+    if re.search(r'\b[\w.+-]+@[\w-]+\.[\w.]+\b', text):
+        return True
+    if len(text) < 20:
+        return True
+    return False
+
+
 def fetch_article_paragraphs(url):
     try:
         ssl_ctx = ssl._create_unverified_context()
@@ -503,6 +576,8 @@ def fetch_article_paragraphs(url):
         for p in paras:
             txt = re.sub(r"<[^>]+>", " ", p)
             txt = re.sub(r"\s+", " ", txt).strip()
+            if _is_junk_paragraph(txt):
+                continue
             if len(txt) > 60 and len(out) < 30:
                 out.append(txt)
         return out
@@ -1103,21 +1178,53 @@ def run():
     else:
         print("  [MODE] images only (Ken Burns stills)")
 
-    # ---- generate images + TTS in parallel (per scene) ----
+    # ---- generate images + TTS (parallel, per scene) ----
+    # Parallelism ported from Split Node (Joe 2026-08-14): each scene's image +
+    # TTS + duration are fully independent (distinct files, distinct dict keys),
+    # so they can render concurrently instead of one-at-a-time. Gated by
+    # IMAGE_CONCURRENCY (default 1 = exactly the old sequential behaviour).
+    # Downstream render/subtitle/audio only read the finished per-scene fields,
+    # so parallelism cannot break them.
     print(f"\n[GEN] Generating {len(shots)} vertical images ({IMAGE_BACKEND}) + TTS...")
     style = _style_descriptor()
-    for i, s in enumerate(shots):
-        img = str(SHOTS_DIR / f"scene_{i:03d}.png")
-        prompt = (f"{style}. Vertical 9:16 cinematic frame for a money-exploit short. "
-                  f"Scene: {s['spoken']}. Highly detailed, dramatic lighting.")
-        print(f"  [IMG {i+1}/{len(shots)}] {s['spoken'][:50]}...")
-        _generate_image(prompt, img)
-        s["image"] = img if os.path.isfile(img) else None
+    _conc = max(1, int(os.environ.get("IMAGE_CONCURRENCY", "1")))
+    if _conc > 1 and len(shots) > 1:
+        from concurrent.futures import ThreadPoolExecutor as _TPE
 
-        tts = str(RENDERED_AUDIO / f"scene_{i:03d}.wav")
-        _tts(s["spoken"], tts)
-        s["tts"] = tts if os.path.isfile(tts) else None
-        s["dur"] = max(_audio_duration(tts), 2.0) if os.path.isfile(tts) else s["dur"]
+        def _gen_one(i_s):
+            i, s = i_s
+            img = str(SHOTS_DIR / f"scene_{i:03d}.png")
+            prompt = (f"{style}. Vertical 9:16 cinematic frame for a money-exploit short. "
+                      f"Scene: {s['spoken']}. Highly detailed, dramatic lighting.")
+            if _scene_shows_hands(s["spoken"]):
+                prompt += _hands_clause()
+            print(f"  [IMG {i+1}/{len(shots)}] {s['spoken'][:50]}...")
+            _generate_image(prompt, img)
+            s["image"] = img if os.path.isfile(img) else None
+            tts = str(RENDERED_AUDIO / f"scene_{i:03d}.wav")
+            _tts(s["spoken"], tts)
+            s["tts"] = tts if os.path.isfile(tts) else None
+            s["dur"] = max(_audio_duration(tts), 2.0) if os.path.isfile(tts) else s["dur"]
+
+        with _TPE(max_workers=_conc) as _ex:
+            list(_ex.map(_gen_one, list(enumerate(shots))))
+    else:
+        for i, s in enumerate(shots):
+            img = str(SHOTS_DIR / f"scene_{i:03d}.png")
+            prompt = (f"{style}. Vertical 9:16 cinematic frame for a money-exploit short. "
+                      f"Scene: {s['spoken']}. Highly detailed, dramatic lighting.")
+            # Hands/anatomy clause (Split Node Bug 3 port): stylized models hallucinate
+            # fingers on hand-visible scenes (clicking/typing/counting cash).
+            if _scene_shows_hands(s["spoken"]):
+                prompt += _hands_clause()
+            print(f"  [IMG {i+1}/{len(shots)}] {s['spoken'][:50]}...")
+            _generate_image(prompt, img)
+            s["image"] = img if os.path.isfile(img) else None
+
+            tts = str(RENDERED_AUDIO / f"scene_{i:03d}.wav")
+            _tts(s["spoken"], tts)
+            s["tts"] = tts if os.path.isfile(tts) else None
+            s["dur"] = max(_audio_duration(tts), 2.0) if os.path.isfile(tts) else s["dur"]
 
     # ---- generate video clips from each image (skipped in images-only) ----
     if gen_videos:
