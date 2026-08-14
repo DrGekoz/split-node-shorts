@@ -2,6 +2,33 @@
 
 All notable changes to Split Node Shorts.
 
+## [1.5.5] - 2026-08-14
+
+### Shorts from an existing Split Node episode
+
+Joe 2026-08-14. New mode that turns a finished Split Node episode into one or
+more ~60s vertical Shorts by condensing its best narration, reusing the
+episode's own shots, and linking back to the source documentary.
+
+- **Mode prompt** — at startup, choose `1. Short from an existing Split Node
+  episode` or `2. New Short from RSS` (env override `SHORTS_FROM_EPISODE=1/0`).
+- **Episode scan** — lists finished episodes from Split Node's `episodes/`
+  folder (those with a narration map, TTS, shots and video).
+- **Whisper verify** — faster-whisper transcribes each narration clip so the
+  system knows what's said and how long it is (`WHISPER_VERIFY=0` to skip and
+  trust the stored narration text).
+- **Gemma pick** — local gemma-4-e4b reviews the narration and selects the best
+  contiguous ~60s window, with a deterministic trim-to-budget pass locking it
+  to ~60s regardless of model drift.
+- **Face-aware shot reuse** — the matching 16:9 shots are cropped to 9:16 with
+  OpenCV face tracking, keeping the face in frame with minimal horizontal shift
+  (not necessarily centered). No new images generated.
+- **Multiple Shorts** — up to 5 distinct ~60s windows per episode.
+- **Related video** — the full episode's URL is put at the top of the short's
+  description so it links back to the source documentary.
+- Verified end-to-end: 56s vertical short rendered from ep015 with subtitles,
+  thumbnail and correct 1080x1920 face-cropped shots.
+
 ## [1.5.4] - 2026-08-14
 
 ### Fix RSS finding no stories + Codex default image backend

@@ -1433,12 +1433,467 @@ def _generate_tags(topic):
 
 
 # ---- main orchestration ---------------------------------------------
+# ===================================================================
+# SHORTS FROM AN EXISTING SPLIT NODE EPISODE (Joe 2026-08-14)
+# ===================================================================
+# Reuses a finished Split Node episode: loads its narration map + existing
+# TTS clips + shot images, whispers the TTS to see what's said, has the local
+# gemma-4-e4b pick the best ~60s of narration, matches the correct shots,
+# face-crops them to 9:16 vertical, and renders/uploads a short. Supports
+# multiple shorts per episode. On upload, links the full episode as related.
+SN_EPISODES_DIR = os.environ.get(
+    "SN_EPISODES_DIR", r"F:/aaaaaVIBECODING/System Breakers/episodes")
+
+
+def _face_crop_offset(img_path, crop_ratio=9.0 / 16.0):
+    """Return the horizontal source-crop offset (x, width) that keeps a
+    detected face in a crop window of the given ratio, with MINIMAL horizontal
+    shift from center (Joe: move it as low as possible, face just needs to be
+    in frame, not centered). Falls back to a centered crop when no face."""
+    try:
+        import cv2
+        img = cv2.imread(str(img_path))
+        if img is None:
+            return None
+        h, w = img.shape[:2]
+        # target crop width for ratio (crop a vertical slice of the wide shot)
+        cw = min(int(h * (1.0 / crop_ratio)), w)  # 16:9 shot -> ~9:16 slice width
+        cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        faces = cascade.detectMultiScale(gray, 1.1, 5, minSize=(40, 40))
+        if len(faces) == 0:
+            return None  # centered crop
+        # biggest face centre
+        (fx, fy, fw, fh) = max(faces, key=lambda f: f[2] * f[3])
+        face_cx = fx + fw / 2.0
+        # centred window; shift only as much as needed to bring the face in
+        x_center = (w - cw) / 2.0
+        x = x_center
+        if face_cx < x:
+            x = max(0, face_cx - cw * 0.05)      # face near left edge
+        elif face_cx > x + cw:
+            x = min(w - cw, face_cx - cw * 0.95)  # face near right edge
+        return (x, cw)
+    except Exception as e:
+        print(f"  [FACE] detection skipped ({e}) - centered crop")
+        return None
+
+
+def _prep_vertical_shot(src_img, dst_img):
+    """Face-aware crop a 16:9 Split Node shot into a 9:16 vertical still.
+    Returns dst path on success, else '' (caller falls back to the source)."""
+    try:
+        from PIL import Image
+        im = Image.open(src_img).convert("RGB")
+        w, h = im.size
+        off = _face_crop_offset(src_img)
+        if off is None:
+            # vertical slice preserving height: crop width = h*(9/16) keeps it
+            # a 9:16-ish region out of the 16:9 frame -> then scale to 1080x1920
+            cw = max(int(round(h * 9.0 / 16.0)), 1)
+            cw = min(cw, w)
+            x = (w - cw) // 2
+        else:
+            x, cw = off
+        crop = im.crop((int(x), 0, int(x + cw), h))
+        crop = crop.resize((1080, 1920), Image.LANCZOS)
+        crop.save(dst_img, "PNG")
+        return dst_img
+    except Exception as e:
+        print(f"  [FACE] vertical prep failed ({e}) - using source")
+        return ""
+
+
+def _list_sn_episodes():
+    """Return sorted [(ep_num, ep_dir)] from Split Node's episodes folder that
+    look finished (have a narration_map + at least one shot + a video)."""
+    out = []
+    root = Path(SN_EPISODES_DIR)
+    if not root.is_dir():
+        print(f"  [EPISODES] not found: {root}")
+        return out
+    for d in sorted(root.glob("ep*")):
+        if not d.is_dir():
+            continue
+        m = re.search(r"ep(\d+)$", d.name)
+        if not m:
+            continue
+        num = int(m.group(1))
+        has_map = (d / "tts" / "narration_map.json").is_file()
+        has_video = any((d / "video").glob("*.mp4"))
+        if has_map and has_video:
+            out.append((num, str(d)))
+    return sorted(out)
+
+
+def _load_episode_assets(ep_dir):
+    """Load narration_map, tts clips, and shot images for an episode.
+    Returns (narration_map, tts_clips, shot_map) where:
+      narration_map = {idx_str: text}
+      tts_clips = {idx_str: path}
+      shot_map = {idx_str: path}  (best shot image per narration index)"""
+    ep = Path(ep_dir)
+    nmp = ep / "tts" / "narration_map.json"
+    nm = {}
+    if nmp.is_file():
+        try:
+            nm = json.loads(nmp.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"  [EP] narration_map load failed: {e}")
+    tts_clips = {}
+    for w in sorted((ep / "tts").glob("narration_*.wav")):
+        m = re.search(r"narration_(\d+)\.wav$", w.name)
+        if m:
+            tts_clips[str(int(m.group(1)))] = str(w)
+    # shots: shotNN_*.png -> index NN-1 (1-based filename)
+    shots = {}
+    for f in sorted(ep.glob("shot*.png")):
+        m = re.match(r"shot(\d+)_", f.name)
+        if m:
+            idx = int(m.group(1)) - 1
+            shots.setdefault(str(idx), str(f))
+    # Normalise narration_map keys to canonical int-strings too ('0'/'00' both -> '0')
+    nm = {str(int(k)): v for k, v in nm.items()}
+    return nm, tts_clips, shots
+
+
+def _whisper_episode(ep_dir, narration_map, tts_clips):
+    """Determine what each narration clip says + its duration.
+
+    Faster-whisper is used to VERIFY the spoken text (Joe: 'use faster-whisper
+    to see what the TTS is saying'). It loads the model once and transcribes
+    each clip. Set WHISPER_VERIFY=0 to skip whisper entirely and trust the
+    stored narration_map text (much faster - ~160 clips take minutes on CPU).
+    Durations always come from ffprobe regardless.
+    Returns {idx: {'text': spoken, 'dur': seconds}}."""
+    verify = os.environ.get("WHISPER_VERIFY", "1") == "1"
+    model = None
+    if verify:
+        try:
+            from faster_whisper import WhisperModel
+            model = WhisperModel("base", device="cpu", compute_type="int8")
+            print("  [WHISPER] verifying narration with faster-whisper "
+                  f"({len(tts_clips)} clips) - set WHISPER_VERIFY=0 to skip")
+        except Exception as e:
+            print(f"  [WHISPER] model load failed ({e}) - using stored narration")
+            model = None
+    res = {}
+    idxs = sorted(set(narration_map) | set(tts_clips),
+                  key=lambda s: int(s))
+    for idx in idxs:
+        tts = tts_clips.get(idx)
+        text = (narration_map.get(idx) or "").strip()
+        dur = _audio_duration(tts) if tts else 0.0
+        if tts and model is not None:
+            try:
+                segments, _ = model.transcribe(tts, language="en",
+                                               word_timestamps=False,
+                                               vad_filter=False)
+                spoken = " ".join(s.text.strip() for s in segments).strip()
+                if spoken:
+                    text = spoken
+            except Exception:
+                pass
+        res[idx] = {"text": text, "dur": max(dur, 0.0)}
+    return res
+
+
+def _gemma_pick_short(narration, target=60.0, count=1, episode_title="",
+                      excluded=()):
+    """Ask local gemma-4-e4b to pick the best ~`target`-second window(s) of
+    narration that condense the episode into a self-contained short.
+    narration = {idx: {text, dur}}. Returns a list of idx-lists (one per short),
+    each a contiguous run of indices summing ~target seconds."""
+    items = sorted(narration.items(), key=lambda kv: int(kv[0]))
+    total = sum(v["dur"] for _, v in items)
+    if total <= 0:
+        return []
+    # Build a compact listing: idx: (dur) text
+    listing = "\n".join(
+        f"  [{i}] ({v['dur']:.1f}s) {v['text'][:140]}"
+        for i, v in items)
+    ex = ""
+    if excluded:
+        ex = ("\nIMPORTANT: these narration windows are ALREADY used for other "
+              "shorts - pick a DIFFERENT part of the story, do not reuse them:\n" +
+              "\n".join(f"  - indices {list(e)}" for e in excluded))
+    sys_msg = (
+        "You are a short-form video editor. Given a documentary narration "
+        "split into numbered clips with their durations (seconds each), choose "
+        "the BEST contiguous run of clips that tells a complete, self-contained "
+        f"story. CRITICAL: the run must sum to roughly {target:.0f} seconds of "
+        "audio - use the per-clip durations to pick the right NUMBER of clips "
+        "(typically 6-12). A hook in the first clip, then the core "
+        "conflict/reveal, then a payoff. Do NOT pick more clips than fit the "
+        "budget. Return STRICTLY JSON only: "
+        '{"windows": [[start_idx, end_idx], ...]} with exactly ' +
+        str(count) + " window(s), start/end as integers (indices from the list).")
+    user = (f"Episode: {episode_title or '(untitled)'}\n"
+            f"Total narration: {total:.0f}s. Pick {count} window(s) that each "
+            f"sum to ~{target:.0f}s. A 60s window needs roughly "
+            f"{max(6, int(target / max([v['dur'] for v in narration.values()] or [1.0]))) }"
+            f" clips. Use the durations below to stay in budget.\n\n"
+            f"NARRATION CLIPS:\n{listing}\n{ex}\n\n"
+            'Respond with only the JSON object.')
+    try:
+        raw = _llm_chat([{"role": "system", "content": sys_msg},
+                         {"role": "user", "content": user}],
+                        max_tokens=300, temp=0.3)
+        raw = re.sub(r"```json|```", "", raw).strip()
+        m = re.search(r"\{.*\}", raw, re.S)
+        if not m:
+            print(f"  [GEMMA] no JSON in response: {raw[:200]}")
+            return []
+        data = json.loads(m.group(0))
+        wins = data.get("windows") or []
+    except Exception as e:
+        print(f"  [GEMMA] selection failed ({e}) - falling back to time splits")
+        wins = []
+    # Validate / normalise windows to contiguous index lists.
+    all_idx = [i for i, _ in items]
+    result = []
+    if not wins:
+        # Fallback: split the timeline evenly into `count` windows.
+        chunk = max(total / count, 1.0)
+        cursor = 0.0
+        bucket, cur_idx = [], 0
+        for i, v in items:
+            bucket.append(i)
+            cursor += v["dur"]
+            if cursor >= chunk and cur_idx < count - 1:
+                if bucket:
+                    result.append(bucket)
+                bucket, cursor = [], 0.0
+                cur_idx += 1
+        if bucket:
+            result.append(bucket)
+        return result[:count]
+    for (s, e) in wins:
+        try:
+            s, e = int(s), int(e)
+        except Exception:
+            continue
+        sel = [i for i in all_idx if s <= int(i) <= e]
+        if sel and sel not in result:
+            result.append(sel)
+    if not result:
+        return result[:count]
+    # DETERMINISTIC trim-to-budget: gemma often picks a window far over target,
+    # so walk the chosen run and find the contiguous sub-window whose duration
+    # is closest to (and not wildly over) `target` - guarantees ~60s shorts
+    # regardless of how badly the small model honours the budget (Joe 2026-08-14).
+    trimmed = []
+    for sel in result:
+        durs = [narration[i]["dur"] for i in sel]
+        best_i, best_j, best_abs = 0, 0, float("inf")
+        i = 0
+        cur = 0.0
+        for j, d in enumerate(durs):
+            cur += d
+            while cur > target * 1.6 and i < j:
+                cur -= durs[i]
+                i += 1
+            if i <= j:
+                cand = abs(cur - target)
+                if cand < best_abs:
+                    best_abs, best_i, best_j = cand, i, j
+        # prefer a window at/under target+20% over an over-budget one
+        best_dur = sum(durs[best_i:best_j + 1])
+        if best_dur > target * 1.3:
+            i = 0
+            cur = 0.0
+            for j, d in enumerate(durs):
+                cur += d
+                if cur >= target:
+                    best_i, best_j = i, j
+                    break
+                while cur > target and i < j:
+                    cur -= durs[i]
+                    i += 1
+        trimmed.append(sel[best_i:best_j + 1])
+    return trimmed[:count]
+
+
+def _find_main_video_url(ep_dir):
+    """Find the full episode's YouTube URL if we can derive it. The pipeline
+    doesn't persist the video id on disk, so we ask the user (or blank)."""
+    print(f"\n  [RELATED] Enter the full episode's YouTube URL (so the short "
+          f"links back to it as related).")
+    print(f"            Episode folder: {ep_dir}")
+    url = input("  YouTube URL (or Enter to skip): ").strip()
+    return url
+
+
+def run_from_episode():
+    """Make vertical Shorts from a finished Split Node episode."""
+    print("\n" + "=" * 58)
+    print("  SHORTS FROM SPLIT NODE EPISODE")
+    print("=" * 58)
+    # SA3 opens on a different port each launch - resolve before any music.
+    try:
+        import sa3_music
+        sa3_music.resolve_sa3_port(project="Split Node Shorts (episode)")
+    except Exception as e:
+        print(f"  [SA3] port check skipped ({e}) - will fall back if music is needed")
+    eps = _list_sn_episodes()
+    if not eps:
+        print("  [FAIL] No finished Split Node episodes found.")
+        return
+    print("  Available episodes:")
+    for num, d in eps:
+        video = next(((Path(d) / "video").glob("*.mp4")), None)
+        print(f"    ep{num:03d}  {os.path.basename(video or d)}")
+    while True:
+        raw = input("  Episode number to make Short(s) from: ").strip()
+        try:
+            want = int(raw)
+            match = next((e for e in eps if e[0] == want), None)
+        except Exception:
+            match = None
+        if match:
+            ep_num, ep_dir = match
+            break
+        print("  [WARN] not a valid episode number from the list")
+    try:
+        n_shorts = int(input("  How many Shorts to make from this episode? [1]: ").strip() or "1")
+    except ValueError:
+        n_shorts = 1
+    n_shorts = max(1, min(n_shorts, 5))
+    if os.environ.get("YOUTUBE_UPLOAD_ENABLED", "1") == "1":
+        main_url = _find_main_video_url(ep_dir)
+    else:
+        main_url = ""
+
+    # Whisper the episode's TTS so we know exactly what's said.
+    print(f"\n[EP] Loading episode {ep_num} ({ep_dir})...")
+    nm, tts_clips, shot_map = _load_episode_assets(ep_dir)
+    if not nm:
+        print("  [FAIL] No narration map.")
+        return
+    spoken = _whisper_episode(ep_dir, nm, tts_clips)
+    print(f"  [EP] {len(spoken)} narration clips loaded "
+          f"({sum(v['dur'] for v in spoken.values()):.0f}s total)")
+
+    excluded = []
+    for short_i in range(1, n_shorts + 1):
+        print(f"\n{'='*58}\n  SHORT {short_i}/{n_shorts}\n{'='*58}")
+        wins = _gemma_pick_short(spoken, target=60.0, count=1,
+                                 excluded=excluded)
+        if not wins:
+            print("  [FAIL] Could not pick narration for this short.")
+            continue
+        chosen = wins[0]
+        excluded.append(chosen)
+        # Build shots: image (face-cropped vertical) + tts + dur + spoken
+        shots = []
+        for idx in chosen:
+            v = spoken.get(idx, {"text": "", "dur": 0.0})
+            if not v["text"]:
+                continue
+            src_img = shot_map.get(idx, "")
+            if not src_img or not os.path.isfile(src_img):
+                continue
+            tts = tts_clips.get(idx, "")
+            if not tts or not os.path.isfile(tts):
+                continue
+            vert = str(SHOTS_DIR / f"ep{ep_num}_short{short_i}_idx{idx}.png")
+            prep = _prep_vertical_shot(src_img, vert)
+            img = prep or src_img
+            shots.append({"idx": idx, "image": img, "tts": tts,
+                          "dur": max(v["dur"], 1.0), "spoken": v["text"],
+                          "text": v["text"], "phase": "DECLARE"})
+        if len(shots) < 3:
+            print(f"  [FAIL] Only {len(shots)} usable shots - need at least 3.")
+            continue
+        total = sum(s["dur"] for s in shots)
+        if total > MAX_SECONDS:
+            print(f"  [TRIM] selected {_fmt(total)} > max - trimming tail")
+            while total > MAX_SECONDS and len(shots) > 4:
+                shots.pop()
+                total = sum(s["dur"] for s in shots)
+        print(f"\n[SCENE BOARD] short {short_i} ({_fmt(total)}):")
+        for s in shots:
+            print(f"  {s['idx']:>4} {s['spoken'][:70]}")
+
+        # Render (Ken Burns stills on the face-cropped verticals).
+        counter = 0
+        if COUNTER_FILE.is_file():
+            try:
+                counter = int(COUNTER_FILE.read_text().strip())
+            except Exception:
+                counter = 0
+        counter += 1
+        out = str(RENDERED_VIDEO / f"ep{ep_num}_short_{counter:03d}.mp4")
+        script_data = {"title": ""}
+        video = _render(shots, script_data, out)
+        if not video:
+            print("  [FAIL] Render failed")
+            continue
+        video = _add_word_subtitles(video, shots,
+                                    style=os.environ.get("SUBTITLE_STYLE", "mrbeast"))
+        thumb = str(THUMBNAILS_DIR / f"ep{ep_num}_short_{counter:03d}.png")
+        thumb_ok = _thumbnail_frame(video, thumb)
+        print(f"  [THUMB] {'OK' if thumb_ok else 'failed'} -> {thumb}")
+
+        # Titles / desc / tags; append the main episode as the related link.
+        topic = " ".join(s["spoken"] for s in shots[:2])
+        title = _generate_title(topic, str(ep_num)) or f"Split Node ep{ep_num} Short"
+        desc = _generate_description(topic, title)
+        if main_url:
+            desc = (f"Full documentary: {main_url}\n\n" + desc)
+        tags = _generate_tags(topic)
+        tags_str = ",".join(tags)
+        print(f"\n  [TITLE] {title}")
+
+        if UPLOAD_ENABLED:
+            print(f"\n  {'='*50}\n  YOUTUBE UPLOAD -> {CHANNEL_NAME} / "
+                  f"'{YOUTUBE_PLAYLIST}'\n  {'='*50}")
+            vid = _upload_video(video, title, desc, tags_str)
+            if vid:
+                print(f"  [OK] Uploaded: https://youtu.be/{vid}")
+                if thumb_ok:
+                    _upload_thumbnail(vid, thumb)
+                _add_to_playlist(vid, YOUTUBE_PLAYLIST)
+                COUNTER_FILE.write_text(str(counter))
+                print(f"  [DONE] Short #{counter:03d} live!")
+            else:
+                print("  [SKIP] Upload failed - video saved locally")
+        else:
+            print("  [SKIP] Upload disabled (YOUTUBE_UPLOAD_ENABLED=0)")
+        print(f"\n  Short complete:\n    video:  {video}\n    thumb:  {thumb}")
+
+
 def run():
     print("=" * 58)
     print("  SPLIT NODE SHORTS - vertical money-exploit Shorts generator")
     print(f"  backend=image:{IMAGE_BACKEND}  video:{VIDEO_BACKEND}")
     print(f"  style={_active_style_name()}  target={int(TARGET_SECONDS)}s  max={int(MAX_SECONDS)}s")
     print("=" * 58)
+
+    # Ask which mode: make Shorts from an existing Split Node episode, or the
+    # normal RSS money-exploit flow (Joe 2026-08-14).
+    if os.environ.get("SHORTS_FROM_EPISODE") == "1":
+        mode = "episode"
+    elif os.environ.get("SHORTS_FROM_EPISODE") == "0":
+        mode = "rss"
+    else:
+        print("\n  What do you want to make?")
+        print("    1. Short from an existing Split Node episode (reuse TTS + shots)")
+        print("    2. New Short from RSS (money-exploit story)")
+        while True:
+            resp = input("  Pick 1 or 2 [1]: ").strip().lower()
+            if resp in ("", "1", "episode", "ep"):
+                mode = "episode"
+                break
+            if resp in ("2", "rss", "new"):
+                mode = "rss"
+                break
+            print(f"  [WARN] '{resp}' not recognised - enter 1 (episode) or 2 (RSS)")
+    if mode == "episode":
+        run_from_episode()
+        _pause()
+        return
 
     # Ask which port Stable Audio 3 is running on BEFORE anything else
     # (SA3's Pinokio launcher opens on a different port each run).

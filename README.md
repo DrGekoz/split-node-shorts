@@ -36,6 +36,8 @@ Every short follows the proven viral formula that's generated hundreds of millio
 
 Split Node Shorts automates the entire vertical-Shorts production workflow. Feed it a "money exploit" story from RSS (or a URL), and it handles everything: scanning 30+ money/finance/scam feeds, LLM-scoring candidates, writing a 6-phase viral Shorts script, generating a vertical image per scene (Higgsfield Nano Banana 2), optionally generating a matching video clip per scene (Higgsfield Wan 3.0), narrating with PocketTTS, generating a **story-adaptive Stable Audio 3 music bed** ducked under the voice, burning in **word-level animated subtitles**, and uploading the finished short to the **Split Node channel's 'Split Node Shorts' playlist**.
 
+It can also **make Shorts from a finished Split Node episode** — see [🎬 Shorts From an Episode](#-shorts-from-an-episode) below.
+
 Built for **content creators and automated channel operators** who want to ship consistent, on-brand AI Shorts — end to end — without touching a video editor.
 
 > **I built this as a fully headless personal pipeline** — no UI, just `RSS in → rendered and uploaded short out`. Every run asks whether you want AI video clips or images-only (Ken Burns), so you control the credit burn.
@@ -268,6 +270,28 @@ python split_node_shorts.py
 ```
 
 Each run asks whether to generate **AI video clips** or **images only**, and asks **which port Stable Audio 3** is on (or auto-detects it). Env override: `GENERATE_VIDEOS=1` / `GENERATE_VIDEOS=0`.
+
+---
+
+## 🎬 Shorts From an Episode
+
+Split Node Shorts can turn a **finished Split Node episode** into one or more vertical Shorts by condensing its best parts into ~60 seconds — no re-scripting from scratch, no re-generating images.
+
+**Flow (pick `1. Short from an existing Split Node episode` at the mode prompt, or set `SHORTS_FROM_EPISODE=1`):**
+
+1. **Pick an episode** — the pipeline scans Split Node's `episodes/` folder and lists finished episodes (those with a narration map, TTS, shots and a video).
+2. **Whisper the existing TTS** — faster-whisper transcribes each narration clip so the system knows exactly what's said (and how long each clip is).
+3. **Gemma picks the best ~60s** — the local gemma-4-e4b (LM Studio) reviews the narration and selects the strongest contiguous window that tells a complete, self-contained story in about a minute. A deterministic trim-to-budget pass then locks it to ~60s (clips re-used from the episode).
+4. **Face-aware shot reuse** — the matching 16:9 shots are cropped to 9:16 vertical with **OpenCV face tracking**, positioning the crop so the face stays in frame (shifted as little as possible, not necessarily centered). No new images are generated.
+5. **Render + subtitles** — the reused shots are Ken-Burns animated to the narration, with word-level subtitles burned in, then the episode's own music bed style (SA3, story-adaptive, ducked under voice).
+6. **Upload with related video** — the short uploads to the Split Node Shorts playlist and the full episode's URL is put at the top of the description so it links back to the source documentary.
+7. **Multiple Shorts** — say how many you want (up to 5) and the pipeline makes several distinct ~60s windows from different parts of the episode.
+
+**Notes:**
+- Set `WHISPER_VERIFY=0` to skip the (slow, CPU) whisper transcription and trust the episode's stored narration text — much faster.
+- If an episode hasn't been uploaded to YouTube yet, you'll be asked for its URL so the short can link back to it (or skip to leave it out).
+
+
 
 ---
 
