@@ -1291,6 +1291,14 @@ def run():
     print(f"  style={_active_style_name()}  target={int(TARGET_SECONDS)}s  max={int(MAX_SECONDS)}s")
     print("=" * 58)
 
+    # Ask which port Stable Audio 3 is running on BEFORE anything else
+    # (SA3's Pinokio launcher opens on a different port each run).
+    try:
+        import sa3_music
+        sa3_music.resolve_sa3_port(project="Split Node Shorts")
+    except Exception as e:
+        print(f"  [SA3] port check skipped ({e}) - will fall back if music is needed")
+
     if not _llm_reachable():
         print("  [FATAL] LM Studio not reachable. Load gemma-4-e4b-uncensored first.")
         return

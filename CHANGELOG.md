@@ -2,6 +2,33 @@
 
 All notable changes to Split Node Shorts.
 
+## [1.5.0] - 2026-08-14
+
+### Story-adaptive Stable Audio 3 music bed + SA3 startup port prompt
+
+Joe 2026-08-14. Split Node Shorts now generates a real, story-adaptive music
+bed with Stable Audio 3 instead of a static pool. The medium model (already
+loaded in the running Pinokio Gradio UI) is driven through its `/generate`
+endpoint via `gradio_client` — no second model load. The bed follows the
+narration: the story text is split proportionally across chunks so each
+segment's music prompt reflects what's happening at that point in the short.
+
+- **SA3 resident-model generation** (`sa3_music.py` → `generate_via_gradio`).
+  Chunks any bed longer than **380s (6:20)** into `N × 380s` segments plus a
+  final remainder; the story context is split proportionally across the chunks
+  for adaptive prompts.
+- **Ducking.** The bed is set at a `-10dB` base and sidechain-ducked to
+  **-19.5dB under the voice** during the mix (FFmpeg `sidechaincompress`).
+- **Never breaks.** If SA3 is unavailable or generation fails, the pipeline
+  falls back to voice-only. Toggle with `MUSIC_BACKEND` (default `sa3`);
+  `SN_SA3_BED_PROMPT` overrides the base musical-style prompt.
+- **SA3 startup port prompt.** SA3's Pinokio launcher opens on a different
+  localhost port each run (7860, 7861, …), so `resolve_sa3_port` is called at
+  startup (right after the banner, before any work): it socket-probes
+  **7860–7890** for the Gradio `/config` signature (`pingpong` + `Stable
+  Audio`), auto-detects a single live UI and asks **"use it? [Y/n]"**, otherwise
+  prompts for the port manually (blank skips music → static-pool fallback).
+
 ## [1.3.0] - 2026-08-14
 
 ### Story resolve-and-retry (don't quit on a blocked article)

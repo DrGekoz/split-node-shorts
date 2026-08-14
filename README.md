@@ -16,7 +16,7 @@
 
 <a href="https://www.buymeacoffee.com/drgekoz" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;"></a>
 
-**A vertical AI Shorts generator. Turns "money exploit" stories (loopholes, glitches, refunds, scams) into ~60-second 9:16 YouTube Shorts in the proven 6-phase viral formula — with LLM-written scripts, Higgsfield images + video clips, voice narration, word-level animated subtitles, and auto-upload to the Split Node channel's 'Split Node Shorts' playlist. Headless: RSS in, rendered and uploaded short out.**
+**A vertical AI Shorts generator. Turns "money exploit" stories (loopholes, glitches, refunds, scams) into ~60-second 9:16 YouTube Shorts in the proven 6-phase viral formula — with LLM-written scripts, Higgsfield images + video clips, voice narration, word-level animated subtitles, a story-adaptive Stable Audio 3 music bed ducked under the voice, and auto-upload to the Split Node channel's 'Split Node Shorts' playlist. Headless: RSS in, rendered and uploaded short out.**
 
 [The Pipeline](#the-pipeline) · [The 6-Phase Formula](#-the-6-phase-viral-formula) · [Supported Models](#supported-models--apis) · [Real-World Cost](#real-world-cost) · [Getting Started](#getting-started) · [Features](#features)
 
@@ -34,7 +34,7 @@ Every short follows the proven viral formula that's generated hundreds of millio
 
 ## What is Split Node Shorts?
 
-Split Node Shorts automates the entire vertical-Shorts production workflow. Feed it a "money exploit" story from RSS (or a URL), and it handles everything: scanning 30+ money/finance/scam feeds, LLM-scoring candidates, writing a 6-phase viral Shorts script, generating a vertical image per scene (Higgsfield Nano Banana 2), optionally generating a matching video clip per scene (Higgsfield Wan 3.0), narrating with PocketTTS, burning in **word-level animated subtitles**, and uploading the finished short to the **Split Node channel's 'Split Node Shorts' playlist**.
+Split Node Shorts automates the entire vertical-Shorts production workflow. Feed it a "money exploit" story from RSS (or a URL), and it handles everything: scanning 30+ money/finance/scam feeds, LLM-scoring candidates, writing a 6-phase viral Shorts script, generating a vertical image per scene (Higgsfield Nano Banana 2), optionally generating a matching video clip per scene (Higgsfield Wan 3.0), narrating with PocketTTS, generating a **story-adaptive Stable Audio 3 music bed** ducked under the voice, burning in **word-level animated subtitles**, and uploading the finished short to the **Split Node channel's 'Split Node Shorts' playlist**.
 
 Built for **content creators and automated channel operators** who want to ship consistent, on-brand AI Shorts — end to end — without touching a video editor.
 
@@ -62,6 +62,7 @@ Split Node Shorts inherits Split Node's core insight: **a small local model (Gem
 | Subtitles + render | faster-whisper + FFmpeg (local) | Free |
 | **Images** | Higgsfield Nano Banana 2 (`nano_banana_flash`) | 1.5 cr/image |
 | **Video clips** *(optional)* | Higgsfield Wan 3.0 (`wan3_0`) | 2.5 cr/sec |
+| Music bed | Stable Audio 3 (local, Pinokio) | Free (local) |
 | Upload | YouTube Data API | Free quota |
 
 **Images-only mode** (Ken Burns stills) runs a whole short for ~1.5 cr/scene — no video credits at all. The video model price is **re-queried on every run** and a `[PRICE CHANGE]` warning is printed if it ever moves.
@@ -109,7 +110,14 @@ RSS / URL money-exploit story
     │
     ▼
 ┌──────────────────────────────────────────────┐
-│  6. RENDER + SUBTITLES                       │
+│  6. MUSIC BED (Stable Audio 3, local)        │
+│     story-adaptive, resident medium model    │
+│     ducked -10dB -> -19.5dB under voice      │
+└──────────────────────────────────────────────┘
+    │
+    ▼
+┌──────────────────────────────────────────────┐
+│  7. RENDER + SUBTITLES                       │
 │     hevc_nvenc vertical render               │
 │     word-level animated captions             │
 │     (faster-whisper + ASS)                   │
@@ -117,7 +125,7 @@ RSS / URL money-exploit story
     │
     ▼
 ┌──────────────────────────────────────────────┐
-│  7. UPLOAD                                   │
+│  8. UPLOAD                                   │
 │     YouTube → Split Node channel             │
 │     'Split Node Shorts' playlist             │
 │     single-frame custom thumbnail            │
@@ -136,6 +144,17 @@ The default look is **Arcane** (same descriptor as Split Node): stylized hand-pa
 
 Word-level animated captions burned into every short (faster-whisper word timings + styled ASS). Selectable style via `SUBTITLE_STYLE`: `hormozi` / `mrbeast` (default) / `karaoke` / `minimal` / `bounce` / `classic`.
 
+### 🎵 Music Bed
+
+A **story-adaptive Stable Audio 3 (SA3) music bed** is generated and sidechain-ducked under the narration. Instead of a static MP3, the pipeline drives the **resident medium model** loaded in the running Pinokio Gradio UI via `gradio_client` (no second model load). The bed adapts to the story: the narration script is split **proportionally across chunks** so each segment's music prompt reflects what's happening in that part of the short.
+
+- **Chunking** — the medium UI caps at **380s (6:20)** per generation; longer beds are split into `N × 380s` segments plus a final remainder (e.g. a 20 min video = 380s × 3 + 60s).
+- **Ducking** — music is set at a `-10dB` base and ducked to **-19.5dB under the voice** via FFmpeg `sidechaincompress` during the mix.
+- **Fallback** — if SA3 is unavailable or generation fails, the pipeline falls back to voice-only (a short never breaks).
+- **Config** — `MUSIC_BACKEND` (default `sa3`) toggles the bed; `SN_SA3_BED_PROMPT` overrides the base musical-style prompt; `SA3_GRADIO_URL` sets the Gradio URL.
+
+**Startup port prompt.** SA3's Pinokio launcher opens on a **different localhost port each run** (7860, 7861, …), so the hard-coded default is unreliable. At startup (right after the banner, before any work) the pipeline calls `resolve_sa3_port`: it socket-probes ports **7860–7890** for the Gradio `/config` signature (`pingpong` + `Stable Audio`), auto-detects a single live UI and asks **"use it? [Y/n]"**, otherwise prompts you to enter the port manually (blank skips music → static-pool fallback).
+
 ---
 
 ## Supported Models & APIs
@@ -150,6 +169,7 @@ Word-level animated captions burned into every short (faster-whisper word timing
 | `STYLE` | `arcane` *(default)* · noir · photoreal · synthwave · + custom |
 | `IMAGE_CONCURRENCY` | concurrent scenes during image+TTS gen · `1` *(default, sequential)* · `3`+ to parallelise |
 | `STORY_RESOLVE_ATTEMPTS` | retries when a picked article doesn't resolve (blocked/no content) · default `5` |
+| `MUSIC_BACKEND` | `sa3` *(default, Stable Audio 3)* · anything else = voice-only |
 
 ```bash
 GENERATE_VIDEOS=0 python split_node_shorts.py    # images-only (Ken Burns, cheap)
@@ -187,6 +207,12 @@ python split_node_shorts.py add-style vhs "<desc>"   # add + persist a style
 |---|---|
 | **PocketTTS** *(local, CUDA)* | Narration per scene (`marius` built-in voice) |
 
+### Music
+
+| Provider | Model | Notes |
+|---|---|---|
+| **Stable Audio 3** *(local, Pinokio)* | medium (resident) | Story-adaptive bed via Gradio `/generate`; chunked @380s; ducked under voice |
+
 ### Subtitles
 
 | Provider | Capability |
@@ -207,6 +233,7 @@ Because the LLM, TTS, subtitles and render run **locally**, a short costs almost
 | Subtitles + render | faster-whisper + FFmpeg | Free |
 | Images *(per scene)* | Higgsfield Nano Banana 2 | 1.5 cr |
 | Video clips *(per scene)* | Higgsfield Wan 3.0 | 2.5 cr/s |
+| Music bed | Stable Audio 3 (local, Pinokio) | Free |
 | Upload | YouTube Data API | Free quota |
 
 **Tip:** use `GENERATE_VIDEOS=0` (images-only) to test / bulk-produce cheaply, then add video clips when you want motion. The video-model price is checked live every run.
@@ -221,6 +248,7 @@ Because the LLM, TTS, subtitles and render run **locally**, a short costs almost
 - **LM Studio** on `localhost:1234` with `gemma-4-e4b-uncensored-hauhaucs-aggressive` loaded
 - **PocketTTS** server on `127.0.0.1:8769`
 - **Higgsfield CLI** installed (`npm i -g @higgsfield/cli`) and authenticated (`higgsfield auth login`) with a workspace selected
+- **Stable Audio 3** via Pinokio (running Gradio UI; the pipeline asks which port at startup)
 - **FFmpeg** with `hevc_nvenc` (NVIDIA)
 - **YouTube API** credentials at `~/.youtube-upload-credentials.json` (same as Split Node)
 
@@ -236,7 +264,7 @@ SplitNodeShorts.bat
 python split_node_shorts.py
 ```
 
-Each run asks whether to generate **AI video clips** or **images only**. Env override: `GENERATE_VIDEOS=1` / `GENERATE_VIDEOS=0`.
+Each run asks whether to generate **AI video clips** or **images only**, and asks **which port Stable Audio 3** is on (or auto-detects it). Env override: `GENERATE_VIDEOS=1` / `GENERATE_VIDEOS=0`.
 
 ---
 
@@ -244,7 +272,8 @@ Each run asks whether to generate **AI video clips** or **images only**. Env ove
 
 ```
 split-node-shorts/
-├── split_node_shorts.py    Main pipeline (all 7 stages)
+├── split_node_shorts.py    Main pipeline (all 8 stages)
+├── sa3_music.py            Stable Audio 3 music bed (port resolution + gradio driver)
 ├── ass_subtitles.py        Word-level styled caption engine (6 styles)
 ├── SplitNodeShorts.bat     One-click launcher (health checks)
 │
@@ -269,5 +298,6 @@ split-node-shorts/
 - **Word-level animated subtitles** — faster-whisper + 6 ASS styles
 - **Arcane + selectable styles** — same system as Split Node, custom styles persist
 - **Live price monitor** — video-model cost re-queried every run, change → warning
+- **Story-adaptive SA3 music bed** — Stable Audio 3, chunked, ducked under voice (local)
 - **Auto-upload** — Split Node channel, 'Split Node Shorts' playlist, single-frame thumbnail
 - **Resume-safe & headless** — RSS in, uploaded short out
