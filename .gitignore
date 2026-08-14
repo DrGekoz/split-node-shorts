@@ -22,6 +22,7 @@ thumbnails/
 .resume_state.json
 .short_counter
 .video_price_state.json
+.template_state
 
 # Test / debug artifacts
 test_output/

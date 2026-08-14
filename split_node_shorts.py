@@ -59,6 +59,14 @@ REJECT_COOLDOWN_DAYS = float(os.environ.get("REJECT_COOLDOWN_DAYS", "14"))  # 2 
 LM_STUDIO_URL = os.environ.get("LM_STUDIO_URL", "http://localhost:1234/v1/chat/completions")
 LLM_MODEL = os.environ.get("LLM_MODEL", "gemma-4-e4b-uncensored-hauhaucs-aggressive")
 POCKET_TTS_URL = os.environ.get("POCKET_TTS_URL", "http://127.0.0.1:8769")
+# Voice clones (Joe 2026-08-14): reuse Split Node's two clones instead of the
+# generic built-in 'marius'. The DECLARE/hook phase uses the announcement INTRO
+# voice; every other phase uses the storytelling STORY voice. Fall back to the
+# built-in catalog name if the clone files are missing.
+_TTS_INTRO = os.environ.get("TTS_VOICE_INTRO",
+                            r"F:\aaaaaVIBECODING\System Breakers\voice_refs\split_node_intro.wav")
+_TTS_STORY = os.environ.get("TTS_VOICE_STORY",
+                            r"F:\aaaaaVIBECODING\System Breakers\voice_refs\split_node_story.wav")
 TTS_VOICE = os.environ.get("TTS_VOICE", "marius")
 
 # ---- channel / branding --------------------------------------------
@@ -381,19 +389,46 @@ def _save_rejected(url):
     REJECTED_FILE.write_text(json.dumps(rejected, indent=2))
 
 def _scan_money_candidates(used, rejected):
+    """Scan feeds for fresh money-exploit stories.
+
+    Dedupe + freshness (Joe 2026-08-14): dedupe by BOTH link AND a normalized
+    title (the same story circulates across many money feeds with slightly
+    different URLs), and drop anything older than FRESHNESS_DAYS so we never
+    re-tell last week's headline. Recency-first, score tiebreak."""
     candidates = []
     seen_links = set()
+    seen_titles = set()
+    freshness_days = float(os.environ.get("FRESHNESS_DAYS", "14"))
+    cutoff = datetime.now(timezone.utc) - timedelta(days=freshness_days)
+
+    def _norm_title(t):
+        return re.sub(r"[^a-z0-9]+", " ", (t or "").lower()).strip()[:60]
+
     feeds = list(MONEY_FEEDS); random.shuffle(feeds)
     for feed in feeds:
         for it in _fetch_rss(feed):
             link = it["link"]
+            nt = _norm_title(it["title"])
             if link in used or link in rejected or link in seen_links:
                 continue
+            if nt and nt in seen_titles:
+                continue  # same story from another feed
+            # freshness filter: skip stories older than the cutoff
+            try:
+                d = datetime.strptime(it.get("date", ""), "%a, %d %b %Y %H:%M:%S %z")
+                if d.tzinfo is None:
+                    d = d.replace(tzinfo=timezone.utc)
+                if d < cutoff:
+                    continue
+            except Exception:
+                pass  # unparseable date -> keep (can't judge freshness)
             score = _money_score(it["title"], it.get("description", ""))
             if score < 40:
                 continue
             it["score"] = score
             seen_links.add(link)
+            if nt:
+                seen_titles.add(nt)
             candidates.append(it)
         if len(candidates) >= 15:
             break
@@ -506,9 +541,77 @@ SHORTS_SCRIPT_SYSTEM = (
 ).format(target=int(TARGET_SECONDS), max=int(MAX_SECONDS),
          spl=SECONDS_PER_LINE, nlines=max(3, int(TARGET_SECONDS / SECONDS_PER_LINE)))
 
+
+# SECOND script template (Joe 2026-08-14): break the 6-phase monotony. Same
+# JSON schema (title/number/scenes[{phase,text}]) so _build_script + the whole
+# downstream parse is IDENTICAL - only the story shape differs. This one opens
+# on the human moment / problem first (relatable cold-open), then escalates to
+# the reveal, instead of leading with the absurd declaration. Rotated against
+# the 6-phase template via _script_template() so the feed never feels like a loop.
+SHORTS_SCRIPT_SYSTEM_STORYFIRST = (
+    "You write viral YouTube SHORTS scripts for 'Split Node Shorts', a channel that "
+    "tells true stories of ordinary people who beat money systems - loopholes, glitches, "
+    "refunds, exploits, frauds, class actions. Vertical 9:16 format.\n\n"
+    "Use the STORY-FIRST formula (relatable cold-open -> escalation -> reveal). "
+    "It hooks through empathy and curiosity rather than an absurd number:\n"
+    "1. HOOK - open on the ordinary person in a relatable moment: the struggle, the "
+    "tight spot, the unfair rule they're stuck with. Make the viewer think 'that's me'. "
+    "Land this in the first 2 seconds.\n"
+    "2. THE RULE - name the system/rule/scam that's holding them back, plainly.\n"
+    "3. THE LOOPHOLE - the single overlooked trick or exception they spot in the fine print.\n"
+    "4. THE PLAN - the step-by-step execution (fast, rhythmic).\n"
+    "5. THE RISK - the near-miss, the almost-caught, the moment it could all collapse.\n"
+    "6. THE WIN - the final payout / twist. End with a completion beat that loops back "
+    "('but the story doesn't end there' or a follow-up tease).\n\n"
+    "HARD RULES:\n"
+    "- Each line is a SEPARATE scene/image. One clear visual per line.\n"
+    "- Target {target}s total, HARD MAX {max}s. ~{spl}s per line -> aim for "
+    "{nlines} lines. Trim ruthlessly.\n"
+    "- First line is the HOOK (a relatable human moment, 2-5 words, no number needed).\n"
+    "- Spoken-word friendly: short punchy lines, no em dashes.\n"
+    "- Label each scene with a phase tag at the start, e.g. 'HOOK: ...'.\n"
+    "- Provide a 'NUMBER' field = a specific figure from the story (the payout, the "
+    "loophole size, the fee dodged) if one exists, else an empty string.\n"
+    "- Provide a 'TITLE' = the video title.\n"
+    "Return STRICT JSON only:\n"
+    "{{\"title\":\"...\", \"number\":\"...\", \"scenes\":[{{\"phase\":\"HOOK\","
+    "\"text\":\"line\"}}, ...]}}"
+).format(target=int(TARGET_SECONDS), max=int(MAX_SECONDS),
+         spl=SECONDS_PER_LINE, nlines=max(3, int(TARGET_SECONDS / SECONDS_PER_LINE)))
+
+
+def _script_template() -> str:
+    """Pick the script-writing template for this run. Rotates between the
+    6-phase and story-first templates so consecutive Shorts don't feel like a
+    loop (Joe 2026-08-14). Env override: SHORTS_TEMPLATE=6phase | storyfirst
+    pins one; SHORTS_TEMPLATE=alternate toggles each run (needs SHORTS_TEMPLATE_STATE
+    writable); default = alternate. All templates share the same JSON schema."""
+    mode = os.environ.get("SHORTS_TEMPLATE", "alternate").strip().lower()
+    if mode == "6phase":
+        return SHORTS_SCRIPT_SYSTEM
+    if mode == "storyfirst":
+        return SHORTS_SCRIPT_SYSTEM_STORYFIRST
+    # alternate: flip a persisted flag so the feed genuinely alternates.
+    flag = os.environ.get("SHORTS_TEMPLATE_STATE",
+                          str(PROJECT_DIR / ".template_state"))
+    use_story = False
+    try:
+        if os.path.isfile(flag):
+            use_story = open(flag).read().strip() != "story"
+    except Exception:
+        pass
+    try:
+        with open(flag, "w") as f:
+            # store which template we are ABOUT to use so the NEXT run flips
+            f.write("story" if use_story else "6phase")
+    except Exception:
+        pass
+    return SHORTS_SCRIPT_SYSTEM_STORYFIRST if use_story else SHORTS_SCRIPT_SYSTEM
+
+
 def _build_script(topic, article_url, content):
     msg = [
-        {"role": "system", "content": SHORTS_SCRIPT_SYSTEM},
+        {"role": "system", "content": _script_template()},
         {"role": "user", "content": (
             f"Story/topic: {topic}\nSource: {article_url}\n\n"
             f"Article content (for facts, keep it true):\n{content[:3000]}\n\n"
@@ -742,21 +845,33 @@ def _generate_video(start_image, prompt, duration):
 
 
 # ---- TTS ------------------------------------------------------------
-def _tts(text, out_path):
+def _voice_for_phase(phase: str) -> str:
+    """Pick the voice clone for a scene phase (Joe 2026-08-14): the DECLARE /
+    hook cold-open uses the announcement INTRO voice, everything else uses the
+    storytelling STORY voice. Falls back to the configured TTS_VOICE if the
+    clone file for that phase is missing (so a missing clone never breaks TTS)."""
+    phase = (phase or "").upper()
+    if phase == "DECLARE" or phase == "HOOK":
+        return _TTS_INTRO if os.path.isfile(_TTS_INTRO) else TTS_VOICE
+    return _TTS_STORY if os.path.isfile(_TTS_STORY) else TTS_VOICE
+
+
+def _tts(text, out_path, voice=None):
     """PocketTTS narration via multipart/form-data (the /tts endpoint expects
     multipart, NOT JSON — a JSON POST silently 422s and produces no audio).
-    TTS_VOICE is a built-in catalog voice name sent as voice_url, or a cloned
-    .wav file path sent as voice_wav."""
+    voice is a built-in catalog voice name (sent as voice_url) or a cloned
+    .wav file path (sent as voice_wav). Defaults to TTS_VOICE."""
     try:
         import requests
         # multipart form fields: text (required), voice_url (built-in name) or
         # voice_wav (cloned clip file)
         data = {"text": text}
         files = {}
-        if os.path.isfile(str(TTS_VOICE)):
-            files["voice_wav"] = open(str(TTS_VOICE), "rb")
+        voice = voice or TTS_VOICE
+        if os.path.isfile(str(voice)):
+            files["voice_wav"] = open(str(voice), "rb")
         else:
-            data["voice_url"] = str(TTS_VOICE)
+            data["voice_url"] = str(voice)
         r = requests.post(f"{POCKET_TTS_URL}/tts", data=data, files=files,
                           timeout=240)
         for f in files.values():
@@ -900,7 +1015,11 @@ def _render_from_clips(shots, clips, output_path, total):
     return output_path
 
 def _build_audio(shots):
-    """Concatenate TTS clips in order -> a single mix WAV. Returns path or None."""
+    """Concatenate TTS clips -> a single mix WAV. Returns path or None.
+
+    A Stable Audio 3 music bed is generated (via the shared sa3_music module)
+    and sidechain-ducked under the voice, matching Split Node / Crayon Diet.
+    If SA3 is unavailable or fails, falls back to voice-only (never breaks)."""
     tts = [s["tts"] for s in shots if s.get("tts") and os.path.isfile(s["tts"])]
     if not tts:
         return None
@@ -908,11 +1027,62 @@ def _build_audio(shots):
     with open(listfile, "w") as f:
         for t in tts:
             f.write(f"file '{os.path.abspath(t).replace(chr(39), chr(39)+chr(92)+chr(39)+chr(39))}'\n")
-    out = str(RENDERED_AUDIO / "mix.wav")
+    voice = str(RENDERED_AUDIO / "voice.wav")
     r = subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listfile,
-                        "-af", "volume=2.0dB,alimiter=limit=1.0", "-ar", "44100", "-ac", "2", out],
+                        "-af", "volume=2.0dB,alimiter=limit=1.0", "-ar", "44100", "-ac", "2", voice],
                        capture_output=True, text=True, timeout=300)
-    return out if r.returncode == 0 and os.path.isfile(out) else None
+    if r.returncode != 0 or not os.path.isfile(voice):
+        return None
+    voice_dur = _audio_duration(voice)
+
+    out = str(RENDERED_AUDIO / "mix.wav")
+    # Music bed via Stable Audio 3 (resident medium model), ducked under the voice
+    try:
+        if os.environ.get("MUSIC_BACKEND", "sa3").strip().lower() == "sa3":
+            import sa3_music
+            if sa3_music.available():
+                tmpdir = tempfile.mkdtemp(prefix="sns_bed_")
+                try:
+                    bed = os.path.join(tmpdir, "bed.wav")
+                    prompt = os.environ.get(
+                        "SN_SA3_BED_PROMPT",
+                        "Tense documentary background music, suspenseful electronic "
+                        "score, no vocals, building tension, cinematic, high quality production")
+                    # Resident-model gen (chunked @380s internally); base music at -10dB.
+                    # Story-adaptive: build prompt from the actual scene script so the
+                    # bed follows what's happening in the short (Joe 2026-08-14).
+                    story = " ".join(
+                        s.get("spoken", "") or s.get("text", "") or ""
+                        for s in shots if (s.get("spoken") or s.get("text")))
+                    if sa3_music.generate_via_gradio(prompt, voice_dur, bed,
+                                                     timeout=1800,
+                                                     story_context=story):
+                        mix = ["ffmpeg", "-y",
+                               "-i", voice,
+                               "-i", bed,
+                               "-filter_complex",
+                               "[1:a]volume=-10dB[lv];"
+                               "[lv][0:a]sidechaincompress=threshold=0.02:ratio=8:"
+                               "attack=30:release=350:makeup=1[ducked];"
+                               "[0:a][ducked]amix=inputs=2:duration=first:normalize=0[out]",
+                               "-map", "[out]", "-ar", "44100", "-ac", "2", out]
+                        rr = subprocess.run(mix, capture_output=True, text=True, timeout=600)
+                        if rr.returncode == 0 and os.path.isfile(out) and os.path.getsize(out) > 1000:
+                            print(f"  [AUDIO] ducked SA3 music bed under voice "
+                                  f"({_fmt(voice_dur)}, -10dB base -> -19.5dB under voice)")
+                            return out
+                        print("  [AUDIO] SA3 mix failed, voice only")
+                    else:
+                        print("  [AUDIO] SA3 bed failed, voice only")
+                finally:
+                    try:
+                        shutil.rmtree(tmpdir, ignore_errors=True)
+                    except Exception:
+                        pass
+    except Exception as e:
+        print(f"  [AUDIO] music bed failed ({e}), voice only")
+
+    return voice if os.path.isfile(voice) else None
 
 def _fmt(s):
     s = int(round(s))
@@ -1221,7 +1391,7 @@ def run():
             _generate_image(prompt, img)
             s["image"] = img if os.path.isfile(img) else None
             tts = str(RENDERED_AUDIO / f"scene_{i:03d}.wav")
-            _tts(s["spoken"], tts)
+            _tts(s["spoken"], tts, _voice_for_phase(s["phase"]))
             s["tts"] = tts if os.path.isfile(tts) else None
             s["dur"] = max(_audio_duration(tts), 2.0) if os.path.isfile(tts) else s["dur"]
 
@@ -1241,7 +1411,7 @@ def run():
             s["image"] = img if os.path.isfile(img) else None
 
             tts = str(RENDERED_AUDIO / f"scene_{i:03d}.wav")
-            _tts(s["spoken"], tts)
+            _tts(s["spoken"], tts, _voice_for_phase(s["phase"]))
             s["tts"] = tts if os.path.isfile(tts) else None
             s["dur"] = max(_audio_duration(tts), 2.0) if os.path.isfile(tts) else s["dur"]
 
