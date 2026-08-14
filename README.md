@@ -153,7 +153,7 @@ A **story-adaptive Stable Audio 3 (SA3) music bed** is generated and sidechain-d
 - **Fallback** — if SA3 is unavailable or generation fails, the pipeline falls back to voice-only (a short never breaks).
 - **Config** — `MUSIC_BACKEND` (default `sa3`) toggles the bed; `SN_SA3_BED_PROMPT` overrides the base musical-style prompt; `SA3_GRADIO_URL` sets the Gradio URL.
 
-**Startup port prompt.** SA3's Pinokio launcher opens on a **different localhost port each run** (7860, 7861, …), so the hard-coded default is unreliable. At startup (right after the banner, before any work) the pipeline calls `resolve_sa3_port`: it socket-probes ports **7860–7890** for the Gradio `/config` signature (`pingpong` + `Stable Audio`), auto-detects a single live UI and asks **"use it? [Y/n]"**, otherwise prompts you to enter the port manually (blank skips music → static-pool fallback).
+**Startup port prompt.** SA3's Pinokio launcher opens on a **different localhost port each run** (7860, 7861, …), so the hard-coded default is unreliable. At startup (right after the banner, before any work) the pipeline calls `resolve_sa3_port`: it socket-probes ports **7860–7890** for the Gradio `/config` signature (`pingpong` + `Stable Audio`), auto-detects a single live UI and asks **"use it? [Y/n, or type a port]"** — press Enter/Y to accept it, type a different port to override, or say no to enter it manually (blank skips music → static-pool fallback).
 
 ---
 
