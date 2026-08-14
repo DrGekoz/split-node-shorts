@@ -678,7 +678,7 @@ def _is_junk_paragraph(text: str) -> bool:
             return True
     if len(text) > 40 and text == text.upper():
         return True
-    if re.match(r'^by\s+[A-Z][a-zA-Z\'\-\]+(\s+[A-Z][a-zA-Z\'\-\]+){0,3}\.?$', text):
+    if re.match(r"^[Bb]y\s+[A-Z]\.?(?:[a-zA-Z'\-\.]*\s+)?[A-Z][a-zA-Z'\-\.]*(\s+[A-Z]\.?[a-zA-Z'\-\.]*){0,4}\.?$", text):
         return True
     if re.search(r'\bis (a|an|the)?\s*(staff|senior|contributing|freelance|award-winning)?\s*(writer|reporter|journalist|editor|correspondent|columnist)\s+(at|for|with)\b', low):
         return True
