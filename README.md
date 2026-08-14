@@ -48,6 +48,7 @@ Split Node Shorts inherits Split Node's core insight: **a small local model (Gem
 
 - **📰 RSS feed injection (story discovery)** — 30+ money-exploit feeds (finance, frugal, churning, coupons, scams, consumer fraud). Each candidate is keyword-scored against the niche; off-topic beats are discarded before the script stage.
 - **🚫 2-week "no" suppression** — say no to a story and it's hidden for 14 days (persisted cooldown), so you never see it again in a single session or across runs.
+- **✅ Parse-before-present** — every candidate is fetched + extracted **before** it's shown to you; a link that's blocked / dead / paywalled / empty is **auto-skipped** (no prompt) and you get the next working story — you only ever see links that actually resolve.
 - **📃 Script injection** — the article's paragraphs are injected as context and the model writes a tight ~60s script in the **6-phase formula** (Declare → Assess → Isolate → Process → Build → Reveal). Target 60s, hard cap 180s.
 - **🎨 Style injection (images)** — every image prompt gets the selected **style profile** injected (e.g. `arcane`, `noir`, `photoreal`, or a custom descriptor). Same style system as Split Node.
 

@@ -445,6 +445,14 @@ def _scan_money_candidates(used, rejected):
 
 # ---- story pick (Y/n, 2-week 'no' suppression) ---------------------
 def _pick_story():
+    """Pick a money-exploit story with user confirmation.
+
+    Joe 2026-08-14: each candidate is PARSED (article fetched + extracted)
+    BEFORE it is presented to the user. A link that fails to resolve (blocked,
+    dead, paywalled, empty) is auto-skipped to the next candidate with no
+    prompt - only working links are offered. Returns (url, title, paragraphs)
+    on accept, or ("", "", []) on abort.
+    """
     used = _load_used()
     rejected = _load_rejected()
     rejected_set = set(rejected.keys())
@@ -454,14 +462,19 @@ def _pick_story():
     print("  [URL]  enter your own article URL")
     src = input("  Enter a URL, or press Enter for RSS: ").strip().strip('"\'')
     if src and src.lower().startswith(("http://", "https://")):
+        title = _fetch_page_title(src)
+        paras = fetch_article_paragraphs(src)
+        if not paras:
+            print(f"  [RESOLVE] custom article did not resolve - aborting")
+            return "", "", []
         _save_used(src)
-        return src, _fetch_page_title(src)
+        return src, title, paras
 
     print("\n[RSS] Scanning money-exploit feeds...")
     pool = _scan_money_candidates(used, rejected_set)
     if not pool:
         print("  [FAIL] No money-exploit stories found. Try again later.")
-        return "", ""
+        return "", "", []
     print(f"  [RSS] {len(pool)} candidate stories found\n")
 
     pool_idx, rounds = 0, 0
@@ -470,27 +483,36 @@ def _pick_story():
             rounds += 1
             if rounds >= 6:
                 print("  [FAIL] Ran out of stories after 6 re-polls.")
-                return "", ""
+                return "", "", []
             print(f"\n  [RSS] Pool exhausted. Re-polling feeds...")
             time.sleep(2)
             pool = _scan_money_candidates(used, rejected_set)
             pool_idx = 0
             if not pool:
-                return "", ""
+                return "", "", []
         chosen = pool[pool_idx]; pool_idx += 1
+        # PARSE BEFORE PRESENTING (Joe 2026-08-14): auto-skip links that don't
+        # resolve, only offer the user working stories.
+        paras = fetch_article_paragraphs(chosen["link"])
+        if not paras:
+            print(f"  [AUTO-SKIP] article did not resolve (blocked/no content): "
+                  f"{chosen['link'][:70]}")
+            _save_rejected(chosen["link"])
+            rejected_set.add(chosen["link"])
+            continue
         print(f"  {'='*58}")
         print(f"  CANDIDATE STORY:")
         print(f"    {chosen['title']}")
         print(f"    {chosen['link']}")
-        print(f"    [money_score={chosen['score']}]")
+        print(f"    [money_score={chosen['score']}]  [resolved: {len(paras)} paragraphs]")
         print(f"  {'='*58}")
         resp = input("  Use this topic? (Y/n/q): ").strip().lower()
         if resp in ("q", "quit"):
             print("  [SKIP] Aborted")
-            return "", ""
+            return "", "", []
         if resp in ("", "y", "yes"):
             _save_used(chosen["link"])
-            return chosen["link"], chosen["title"]
+            return chosen["link"], chosen["title"], paras
         # user said no - suppress for 2 weeks
         _save_rejected(chosen["link"])
         rejected_set.add(chosen["link"])
@@ -1306,20 +1328,19 @@ def run():
     # Ping the live video-model price every run; surface a change if it moved.
     _check_video_price()
 
-    # Pick a story AND resolve its article before committing. If the chosen
-    # article is blocked / returns no content (or the script can't be built),
-    # reject it and loop back to picking a different one instead of quitting
-    # (Joe 2026-08-14).
+    # Pick a story. _pick_story now PARSES each candidate before presenting it
+    # and auto-skips links that don't resolve, so the returned article is
+    # already fetched (Joe 2026-08-14). If the script still can't be built from
+    # it, reject it and loop back to picking a different one instead of quitting.
     max_attempts = int(os.environ.get("STORY_RESOLVE_ATTEMPTS", "5"))
     url, topic = "", ""
     content = []
     script = {}
     for _attempt in range(1, max_attempts + 1):
-        url, topic = _pick_story()
+        url, topic, content = _pick_story()
         if not url:
             return
         print(f"\n  [TOPIC] {topic}\n  [URL] {url}")
-        content = fetch_article_paragraphs(url)
         if not content:
             print(f"  [FAIL] Article did not resolve (blocked / no content): {url}")
             print(f"  [RETRY] Picking a different story ({_attempt}/{max_attempts})...")
