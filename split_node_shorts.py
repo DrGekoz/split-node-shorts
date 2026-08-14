@@ -12,9 +12,9 @@ Pipeline (mirrors Split Node, but vertical 9:16 + Higgsfield backend):
   -> thumbnail (single frame)
   -> YouTube upload -> Split Node channel, 'Split Node Shorts' playlist
 
-Backends: IMAGE_BACKEND=higgsfield (default, nano_banana_flash) or
-gptimage2 (GPT Image 2 via higgsfield - for when the rate limit lifts).
-Default is higgsfield.
+Backends: IMAGE_BACKEND=codex (default, local Codex CLI GPT Image 2, no API
+key) or higgsfield (nano_banana_flash) / gptimage2 (GPT Image 2 via higgsfield).
+VIDEO stays higgsfield (wan3_0). Default is codex.
 """
 
 import os, re, sys, json, ssl, random, time, subprocess, shutil, tempfile, math
@@ -98,7 +98,7 @@ HIGGS_IMAGE_MODEL = os.environ.get("HIGGS_IMAGE_MODEL", "nano_banana_flash")
 # re-queried on every run and a change is surfaced to the user.
 HIGGS_VIDEO_MODEL = os.environ.get("HIGGS_VIDEO_MODEL", "wan3_0")
 GPT_IMAGE_MODEL = os.environ.get("GPT_IMAGE_MODEL", "gpt_image_2")
-IMAGE_BACKEND = os.environ.get("IMAGE_BACKEND", "higgsfield").strip().lower()  # higgsfield | gptimage2
+IMAGE_BACKEND = os.environ.get("IMAGE_BACKEND", "codex").strip().lower()  # codex | higgsfield | gptimage2
 VIDEO_BACKEND = os.environ.get("VIDEO_BACKEND", "higgsfield").strip().lower()
 # Price-monitor state file: remembers the last-seen video model cost so a price
 # change can be surfaced to the user on the next run.
@@ -423,7 +423,7 @@ def _scan_money_candidates(used, rejected):
             except Exception:
                 pass  # unparseable date -> keep (can't judge freshness)
             score = _money_score(it["title"], it.get("description", ""))
-            if score < 40:
+            if score < 30:
                 continue
             it["score"] = score
             seen_links.add(link)
@@ -802,9 +802,136 @@ def _check_video_price():
         print(f"  [PRICE] could not query {HIGGS_VIDEO_MODEL} cost")
     return per_sec
 
+# Codex output-claiming is shared across parallel threads (each call records
+# the PNGs present before it runs, generates, then claims the newest file that
+# is new AND not already claimed by another thread).
+_CODEX_LOCK = None
+_CODEX_CLAIMED = set()
+
+
+def _codex_lock():
+    global _CODEX_LOCK
+    if _CODEX_LOCK is None:
+        import threading
+        _CODEX_LOCK = threading.Lock()
+    return _CODEX_LOCK
+
+
+def _codex_available() -> bool:
+    try:
+        import shutil
+        return shutil.which("codex") is not None or shutil.which("codex.exe") is not None
+    except Exception:
+        return False
+
+
+def _generate_image_codex(prompt, out_path, timeout=900):
+    """Generate one image via the OpenAI Codex CLI (/imagegen -> GPT Image 2).
+
+    Codex CLI 0.147+ does NOT print a "Saved at:" path for a fresh generation -
+    it just reports "Generated the image...". The PNG lands in a fresh uuid dir
+    under ~/.codex/generated_images/<uuid>/call_*.png. We snapshot the PNG set
+    BEFORE the call, then claim the NEWEST png that is new since the snapshot
+    and not already claimed by a concurrent thread. No API key needed.
+    """
+    import glob
+    import shutil
+    import subprocess
+    import tempfile
+    import uuid
+    if not _codex_available():
+        print("  [IMG] codex CLI not found on PATH - install with: npm install -g @openai/codex")
+        return False
+    generated = Path.home() / ".codex" / "generated_images"
+    generated.mkdir(parents=True, exist_ok=True)
+
+    def _snapshot() -> dict:
+        m = {}
+        for p in (glob.glob(str(generated / "**" / "call_*.png"), recursive=True)
+                  + glob.glob(str(generated / "**" / "ig_*.png"), recursive=True)):
+            if os.path.isfile(p):
+                m[os.path.abspath(p)] = os.path.getmtime(p)
+        return m
+
+    with _codex_lock():
+        before = _snapshot()
+
+    _tmp = os.path.join(tempfile.gettempdir(), f"codex_payload_{uuid.uuid4().hex[:8]}.txt")
+    with open(_tmp, "w", encoding="utf-8") as _f:
+        _f.write("/imagegen " + prompt)
+    try:
+        ps_cmd = f"Get-Content -Raw '{_tmp}' | codex exec --skip-git-repo-check"
+        proc = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps_cmd],
+                              capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print("  [IMG] codex timed out generating image")
+        try:
+            os.remove(_tmp)
+        except Exception:
+            pass
+        return False
+    try:
+        os.remove(_tmp)
+    except Exception:
+        pass
+    out_text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "",
+                      (proc.stdout or "") + "\n" + (proc.stderr or ""))
+    # Rate-limit / failure detection (before anything else).
+    if re.search(r"(?i)rate\s*limit|429|too\s*many\s*requests|quota|"
+                 r"limit\s*exceeded|capacity|temporarily\s*unavailable|"
+                 r"overloaded|slow\s*down|try\s*again\s*in", out_text):
+        print("  [IMG] codex rate-limited - will retry this image")
+        return False
+    # Poll briefly for the new PNG to appear (Windows flushes async).
+    src = None
+    for _i in range(int(os.environ.get("CODEX_FLUSH_WAIT", "15"))):
+        with _codex_lock():
+            after = _snapshot()
+        cands = []
+        for ap in after:
+            if ap in before or ap in _CODEX_CLAIMED:
+                continue
+            cands.append((after[ap], ap))
+        if cands:
+            # Newest new file = this call's output (fresh uuid dir per call).
+            cands.sort(reverse=True)
+            ap = cands[0][1]
+            with _codex_lock():
+                if ap not in _CODEX_CLAIMED:
+                    _CODEX_CLAIMED.add(ap)
+                    src = ap
+            if src:
+                break
+        if _i == 0:
+            print("  [IMG] codex: waiting for image to flush to disk...")
+        import time as _t
+        _t.sleep(1)
+    if src is None:
+        print("  [IMG] codex could not deterministically locate this call's output - retrying")
+        return False
+    try:
+        shutil.copy2(src, out_path)
+    except Exception as e:
+        print(f"  [IMG] codex copy failed: {e}")
+        return False
+    try:
+        os.remove(src)
+        try:
+            os.rmdir(os.path.dirname(src))
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return os.path.isfile(out_path) and os.path.getsize(out_path) > 1000
+
+
 def _generate_image(prompt, out_path, refs=None):
-    """Generate one vertical 9:16 image via Higgsfield.
-    Backend higgsfield -> nano_banana_flash (1.5cr). gptimage2 -> GPT Image 2 (future)."""
+    """Generate one vertical 9:16 image.
+
+    Backend higgsfield -> nano_banana_flash (1.5cr); gptimage2 -> GPT Image 2;
+    codex -> local Codex CLI /imagegen (GPT Image 2, no API key)."""
+    if IMAGE_BACKEND == "codex":
+        return _generate_image_codex(prompt, out_path)
     model = GPT_IMAGE_MODEL if IMAGE_BACKEND == "gptimage2" else HIGGS_IMAGE_MODEL
     cmd = ["generate", "create", model,
            "--prompt", prompt, "--aspect_ratio", "9:16", "--resolution", "2k",

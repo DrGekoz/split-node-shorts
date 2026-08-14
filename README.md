@@ -61,12 +61,12 @@ Split Node Shorts inherits Split Node's core insight: **a small local model (Gem
 | Story + Script | LM Studio (local, Gemma 4) | Free |
 | Narration TTS | PocketTTS (local) | Free |
 | Subtitles + render | faster-whisper + FFmpeg (local) | Free |
-| **Images** | Higgsfield Nano Banana 2 (`nano_banana_flash`) | 1.5 cr/image |
+| **Images** | Codex CLI GPT Image 2 *(default, local, free)* · Higgsfield Nano Banana 2 (1.5 cr/image) | `IMAGE_BACKEND=codex`/`higgsfield` |
 | **Video clips** *(optional)* | Higgsfield Wan 3.0 (`wan3_0`) | 2.5 cr/sec |
 | Music bed | Stable Audio 3 (local, Pinokio) | Free (local) |
 | Upload | YouTube Data API | Free quota |
 
-**Images-only mode** (Ken Burns stills) runs a whole short for ~1.5 cr/scene — no video credits at all. The video model price is **re-queried on every run** and a `[PRICE CHANGE]` warning is printed if it ever moves.
+**Default (Codex) image mode runs the whole short's stills locally for free** — no image credits at all; the only credit cost is optional AI video clips. The video model price is **re-queried on every run** and a `[PRICE CHANGE]` warning is printed if it ever moves.
 
 ---
 
@@ -92,8 +92,8 @@ RSS / URL money-exploit story
     │
     ▼
 ┌──────────────────────────────────────────────┐
-│  3. IMAGES (Higgsfield nano_banana_flash)    │
-│     9:16 vertical, 1080p · one per scene     │
+│  3. IMAGES (Codex CLI GPT Image 2,            │
+│     local, free) · 9:16 vertical, per scene   │
 └──────────────────────────────────────────────┘
     │
     ▼
@@ -162,7 +162,7 @@ A **story-adaptive Stable Audio 3 (SA3) music bed** is generated and sidechain-d
 
 | Selection | Values |
 |---|---|
-| `IMAGE_BACKEND` | `higgsfield` *(default, nano_banana_flash)* · `gptimage2` (GPT Image 2 via Higgsfield) |
+| `IMAGE_BACKEND` | `codex` *(default, local Codex CLI GPT Image 2, no API key)* · `higgsfield` (nano_banana_flash) · `gptimage2` |
 | `VIDEO_BACKEND` | `higgsfield` *(default, wan3_0)* |
 | `HIGGS_VIDEO_MODEL` | `wan3_0` *(default)* · `kling3_0` · `kling3_0_turbo` |
 | `GENERATE_VIDEOS` | unset → **asks per run** · `1` = videos · `0` = images-only |
@@ -192,8 +192,9 @@ python split_node_shorts.py add-style vhs "<desc>"   # add + persist a style
 
 | Provider | Model | Notes |
 |---|---|---|
-| **Higgsfield** | Nano Banana 2 (`nano_banana_flash`) | 1.5 cr/image, 9:16, 1080p |
-| **Higgsfield** *(future)* | GPT Image 2 (`gpt_image_2`) | `IMAGE_BACKEND=gptimage2` — feed images back into Higgsfield for video |
+| **Codex CLI** *(local, default)* | GPT Image 2 (`gpt-image-2`) | `IMAGE_BACKEND=codex` — free, no API key, local OpenAI Codex CLI `/imagegen`; vertical 9:16 |
+| **Higgsfield** | Nano Banana 2 (`nano_banana_flash`) | `IMAGE_BACKEND=higgsfield` — 1.5 cr/image, 9:16, 1080p |
+| **Higgsfield** | GPT Image 2 (`gpt_image_2`) | `IMAGE_BACKEND=gptimage2` — GPT Image 2 via Higgsfield |
 
 ### Video Generation
 
@@ -248,7 +249,8 @@ Because the LLM, TTS, subtitles and render run **locally**, a short costs almost
 - **Python 3.11+**
 - **LM Studio** on `localhost:1234` with `gemma-4-e4b-uncensored-hauhaucs-aggressive` loaded
 - **PocketTTS** server on `127.0.0.1:8769`
-- **Higgsfield CLI** installed (`npm i -g @higgsfield/cli`) and authenticated (`higgsfield auth login`) with a workspace selected
+- **Higgsfield CLI** installed (`npm i -g @higgsfield/cli`) and authenticated (`higgsfield auth login`) with a workspace selected — *only needed for video clips / the `higgsfield` image backend*
+- **OpenAI Codex CLI** installed (`npm install -g @openai/codex`) — *default image backend* (`IMAGE_BACKEND=codex`, GPT Image 2, no API key)
 - **Stable Audio 3** via Pinokio (running Gradio UI; the pipeline asks which port at startup)
 - **FFmpeg** with `hevc_nvenc` (NVIDIA)
 - **YouTube API** credentials at `~/.youtube-upload-credentials.json` (same as Split Node)

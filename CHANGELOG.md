@@ -2,6 +2,26 @@
 
 All notable changes to Split Node Shorts.
 
+## [1.5.4] - 2026-08-14
+
+### Fix RSS finding no stories + Codex default image backend
+
+Joe 2026-08-14.
+
+- **RSS scan found nothing.** The `_money_score` threshold was `>= 40`, but a
+  real money story with a single strong keyword (e.g. "billion", "million" =
+  30) scored below it, so nearly every candidate was dropped and the scan
+  reported "No money-exploit stories found". Lowered the threshold to `>= 30`
+  so one strong keyword passes. Verified: the same scan now returns 17
+  candidates instead of 0.
+- **Codex image backend (default).** Images now generate via the local OpenAI
+  **Codex CLI** `/imagegen` (GPT Image 2) with no API key, instead of
+  Higgsfield. `IMAGE_BACKEND=codex` is the new default (`.env` updated);
+  `higgsfield` / `gptimage2` still available. Output-claiming is deterministic
+  and parallel-safe (snapshot the PNG set before each call, claim the newest
+  new file). Video clips stay on Higgsfield (`wan3_0`). Verified: a vertical
+  9:16 image generated in ~71s.
+
 ## [1.5.3] - 2026-08-14
 
 ### Fix: broken byline regex crashed every article fetch
