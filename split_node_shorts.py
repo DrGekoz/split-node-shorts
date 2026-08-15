@@ -925,11 +925,29 @@ def _generate_image_codex(prompt, out_path, timeout=900):
     return os.path.isfile(out_path) and os.path.getsize(out_path) > 1000
 
 
+_IMG_BAN_RE = re.compile(
+    r"\b(unreal\s+engine(?:\s*5)?|machin(?:e|es|ery))\b", re.IGNORECASE)
+
+
+def _sanitize_image_prompt(prompt):
+    """Strip banned words ('unreal engine', 'machine') from an image/video prompt
+    and tidy the spacing left behind (Joe 2026-08-15). These must never reach the
+    visual generator."""
+    if not prompt:
+        return prompt
+    p = _IMG_BAN_RE.sub("", prompt)
+    p = re.sub(r"\s{2,}", " ", p)
+    p = re.sub(r"\s+([,.;:!?])", r"\1", p)
+    p = re.sub(r"([,.;:!?])\s*,", r"\1", p)
+    return p.strip()
+
+
 def _generate_image(prompt, out_path, refs=None):
     """Generate one vertical 9:16 image.
 
     Backend higgsfield -> nano_banana_flash (1.5cr); gptimage2 -> GPT Image 2;
     codex -> local Codex CLI /imagegen (GPT Image 2, no API key)."""
+    prompt = _sanitize_image_prompt(prompt)
     if IMAGE_BACKEND == "codex":
         return _generate_image_codex(prompt, out_path)
     model = GPT_IMAGE_MODEL if IMAGE_BACKEND == "gptimage2" else HIGGS_IMAGE_MODEL
@@ -972,6 +990,7 @@ def _generate_video(start_image, prompt, duration):
     """Generate a vertical 9:16 video clip via Higgsfield (default wan3_0, 5cr).
     duration clamped to the model's supported range (wan3_0: 2-30s)."""
     duration = max(2, min(int(round(duration)), 30))
+    prompt = _sanitize_image_prompt(prompt)
     cmd = ["generate", "create", HIGGS_VIDEO_MODEL,
            "--prompt", prompt, "--aspect_ratio", "9:16",
            "--duration", str(duration),
@@ -1251,29 +1270,13 @@ def _thumbnail_frame(video_path, out_path):
 
 # ---- YouTube upload -------------------------------------------------
 def _get_youtube_creds():
-    if not YOUTUBE_CREDENTIALS.is_file():
-        return None
-    try:
-        from google.oauth2.credentials import Credentials as GC
-        from google.auth.transport.requests import Request as GRequest
-        data = json.loads(YOUTUBE_CREDENTIALS.read_text())
-        creds = GC(
-            token=data.get("access_token", data.get("token", "")),
-            refresh_token=data.get("refresh_token"),
-            client_id=data.get("client_id"),
-            client_secret=data.get("client_secret"),
-            token_uri=data.get("token_uri", "https://oauth2.googleapis.com/token"),
-            scopes=data.get("scopes", ["https://www.googleapis.com/auth/youtube.upload"]))
-        if not creds.valid:
-            creds.refresh(GRequest())
-            data["access_token"] = creds.token
-            data["token"] = creds.token
-            YOUTUBE_CREDENTIALS.write_text(json.dumps(data, indent=2))
-            print("  [OK] YouTube token refreshed")
-        return creds
-    except Exception as e:
-        print(f"  [WARN] Credential load failed: {e}")
-        return None
+    import youtube_reauth
+    # Shorts upload to the Split Node channel, so the OAuth client secret
+    # lives in the Split Node (System Breakers) project folder.
+    secret_dir = r"F:\aaaaaVIBECODING\System Breakers"
+    return youtube_reauth.ensure_youtube_creds(
+        YOUTUBE_CREDENTIALS, Path(__file__).resolve().parent,
+        "Split Node Shorts", secrets_dir=secret_dir)
 
 def _upload_video(video_path, title, description, tags_str, privacy="public"):
     creds = _get_youtube_creds()
@@ -1290,6 +1293,7 @@ def _upload_video(video_path, title, description, tags_str, privacy="public"):
                    "selfDeclaredMadeForKids": False},
     }
     try:
+        upload_url = None
         r = requests.post(
             "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
             headers={"Authorization": f"Bearer {creds.token}",
@@ -1300,9 +1304,22 @@ def _upload_video(video_path, title, description, tags_str, privacy="public"):
         if r.status_code != 200:
             print(f"  [WARN] Upload init failed (HTTP {r.status_code})")
             if r.status_code in (401, 403):
-                print("  [WARN] Re-auth needed: python oauth_split_node.py")
-            return None
-        upload_url = r.headers.get("Location")
+                print("  [WARN] Token invalid - re-authorizing and retrying...")
+                creds = _get_youtube_creds()  # re-auths inline if needed
+                if creds:
+                    r = requests.post(
+                        "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
+                        headers={"Authorization": f"Bearer {creds.token}",
+                                 "Content-Type": "application/json",
+                                 "X-Upload-Content-Length": str(file_size),
+                                 "X-Upload-Content-Type": "video/mp4"},
+                        json=body, timeout=30)
+                    if r.status_code == 200:
+                        upload_url = r.headers.get("Location")
+            if not upload_url:
+                return None
+        else:
+            upload_url = r.headers.get("Location")
         if not upload_url:
             return None
         chunk = 256 * 1024
@@ -1994,8 +2011,8 @@ def run():
         def _gen_one(i_s):
             i, s = i_s
             img = str(SHOTS_DIR / f"scene_{i:03d}.png")
-            prompt = (f"{style}. Vertical 9:16 cinematic frame for a money-exploit short. "
-                      f"Scene: {s['spoken']}. Highly detailed, dramatic lighting.")
+            prompt = (f"{style}. Vertical 9:16 frame for a money-exploit short. "
+                      f"Scene: {s['spoken']}.")
             if _scene_shows_hands(s["spoken"]):
                 prompt += _hands_clause()
             print(f"  [IMG {i+1}/{len(shots)}] {s['spoken'][:50]}...")
@@ -2011,8 +2028,8 @@ def run():
     else:
         for i, s in enumerate(shots):
             img = str(SHOTS_DIR / f"scene_{i:03d}.png")
-            prompt = (f"{style}. Vertical 9:16 cinematic frame for a money-exploit short. "
-                      f"Scene: {s['spoken']}. Highly detailed, dramatic lighting.")
+            prompt = (f"{style}. Vertical 9:16 frame for a money-exploit short. "
+                      f"Scene: {s['spoken']}.")
             # Hands/anatomy clause (Split Node Bug 3 port): stylized models hallucinate
             # fingers on hand-visible scenes (clicking/typing/counting cash).
             if _scene_shows_hands(s["spoken"]):
