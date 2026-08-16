@@ -2,6 +2,17 @@
 
 All notable changes to Split Node Shorts.
 
+## [1.5.7] - 2026-08-16
+
+### LLM backend selector
+
+- At startup, pick which LLM writes the script: **LM Studio** (lists the currently-loaded models, you choose one) or **Codex** (lists models sorted cheapest-first, you choose one). `_llm_chat` routes to Codex when selected.
+- Headless/cron runs can set `LLM_PROVIDER` + `LLM_MODEL` env vars to skip the prompt. Joe 2026-08-16.
+
+### Repo hygiene
+
+- `cast_refs/` is no longer tracked in git (re-downloaded/generated at runtime).
+
 ## [1.5.5] - 2026-08-14
 
 ### Shorts from an existing Split Node episode

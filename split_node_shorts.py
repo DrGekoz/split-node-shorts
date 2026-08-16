@@ -58,6 +58,147 @@ REJECT_COOLDOWN_DAYS = float(os.environ.get("REJECT_COOLDOWN_DAYS", "14"))  # 2 
 # ---- services -------------------------------------------------------
 LM_STUDIO_URL = os.environ.get("LM_STUDIO_URL", "http://localhost:1234/v1/chat/completions")
 LLM_MODEL = os.environ.get("LLM_MODEL", "gemma-4-e4b-uncensored-hauhaucs-aggressive")
+
+# ---- LLM backend selection (Joe 2026-08-16) ------------------------------
+# Chosen at startup via _select_llm(): either LM Studio (a loaded local model)
+# or Codex (a cloud OpenAI model, listed cheapest-first). _llm_chat dispatches
+# to Codex when LLM_PROVIDER=='codex', else LM Studio with LLM_MODEL.
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "").strip().lower()
+NARRATIVE_MODEL = LLM_MODEL
+
+# Approx USD per 1M input tokens for the Codex/OpenAI models that actually work
+# on a ChatGPT account. Used ONLY to sort the Codex picker cheapest-first.
+CODEX_MODEL_CATALOG = {
+    "gpt-5.4": 1.25,   # tested default
+    "gpt-5.3": 1.25,
+    "gpt-5.2": 1.25,
+    "gpt-5":   1.25,
+    "gpt-5.5": 2.50,   # pricier
+}
+
+
+def _lmstudio_loaded_models() -> list:
+    """IDs of the models currently loaded in LM Studio (/v1/models)."""
+    try:
+        req = urllib.request.Request(
+            "http://localhost:1234/v1/models",
+            headers={"User-Agent": "splitnode/1.1"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            data = json.loads(r.read().decode())
+        return [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+    except Exception:
+        return []
+
+
+def _select_llm() -> None:
+    """Startup prompt: pick the LLM backend + model.
+      1 = LM Studio (lists currently-loaded models, you pick)
+      2 = Codex     (lists models sorted cheapest-first, you pick)
+    LLM_PROVIDER + LLM_MODEL env vars skip the prompt (headless/cron runs)."""
+    global LLM_PROVIDER, LLM_MODEL, NARRATIVE_MODEL
+    if LLM_PROVIDER and LLM_MODEL:
+        NARRATIVE_MODEL = LLM_MODEL
+        print(f"  [LLM] backend={LLM_PROVIDER} model={NARRATIVE_MODEL} (env)")
+        return
+    print("\n  Select the LLM backend for this run:")
+    print("    1) LM Studio  (local - shows loaded models, you pick)")
+    print("    2) Codex      (cloud OpenAI - models sorted by cheapest)")
+    choice = input("  LLM backend [1/2, Enter=LM Studio]: ").strip().lower()
+    if choice in ("2", "codex"):
+        _select_llm_codex()
+    else:
+        _select_llm_lmstudio()
+
+
+def _select_llm_lmstudio() -> None:
+    global LLM_PROVIDER, LLM_MODEL, NARRATIVE_MODEL
+    models = _lmstudio_loaded_models()
+    if not models:
+        print("  [LLM] LM Studio not reachable / nothing loaded on :1234")
+        LLM_PROVIDER = "lmstudio"
+        LLM_MODEL = LLM_MODEL or "gemma-4-e4b-uncensored-hauhaucs-aggressive"
+        NARRATIVE_MODEL = LLM_MODEL
+        print(f"  [LLM] defaulting to LM Studio / {LLM_MODEL}")
+        return
+    print("  Loaded LM Studio models:")
+    for i, m in enumerate(models, 1):
+        print(f"    {i}) {m}")
+    idx = input(f"  Pick model [1-{len(models)}, Enter={models[0]}]: ").strip()
+    try:
+        LLM_MODEL = models[int(idx) - 1]
+    except (ValueError, IndexError):
+        LLM_MODEL = models[0]
+    LLM_PROVIDER = "lmstudio"
+    NARRATIVE_MODEL = LLM_MODEL
+    print(f"  [LLM] LM Studio -> {LLM_MODEL}")
+
+
+def _select_llm_codex() -> None:
+    global LLM_PROVIDER, LLM_MODEL, NARRATIVE_MODEL
+    cat = sorted(CODEX_MODEL_CATALOG.items(), key=lambda kv: (kv[1], kv[0]))
+    print("  Codex models (cheapest first):")
+    for i, (m, price) in enumerate(cat, 1):
+        star = "  (default)" if m == "gpt-5.4" else ""
+        print(f"    {i}) {m:<10} ~${price:.2f}/1M in{star}")
+    idx = input(f"  Pick model [1-{len(cat)}, Enter={cat[0][0]}]: ").strip()
+    try:
+        NARRATIVE_MODEL = cat[int(idx) - 1][0]
+    except (ValueError, IndexError):
+        NARRATIVE_MODEL = cat[0][0]
+    LLM_PROVIDER = "codex"
+    # Keep a valid LOCAL model so _llm_reachable()/aux probes don't break.
+    if not LLM_MODEL:
+        locals_ = _lmstudio_loaded_models()
+        LLM_MODEL = (locals_[0] if locals_
+                     else "gemma-4-e4b-uncensored-hauhaucs-aggressive")
+    print(f"  [LLM] Codex -> {NARRATIVE_MODEL} (aux LM Studio -> {LLM_MODEL})")
+
+
+def _codex_llm_chat(messages, max_tokens=900, temp=0.8) -> str:
+    """Run an LLM prompt through the Codex CLI with the selected model.
+    Mirrors _llm_chat's contract (returns text, or '' on failure) so callers'
+    retry/fallback logic is untouched. System+user messages combined into ONE
+    prompt and piped to codex on stdin via a temp file (the ep014 PowerShell
+    arg-length fix)."""
+    if not _codex_available():
+        print("  [CODEX] codex CLI not found on PATH - falling back to LM Studio")
+        return ""
+    sys_p = next((m.get("content", "") for m in messages
+                  if m.get("role") == "system"), "")
+    user_p = "\n\n".join(m.get("content", "") for m in messages
+                         if m.get("role") == "user")
+    prompt = f"{sys_p}\n\n{user_p}".strip() if sys_p else user_p
+    if not prompt:
+        return ""
+    import tempfile, uuid, subprocess
+    _tmp = os.path.join(tempfile.gettempdir(),
+                        f"codex_llm_{uuid.uuid4().hex[:8]}.txt")
+    try:
+        with open(_tmp, "w", encoding="utf-8") as _f:
+            _f.write(prompt)
+    except Exception as _e:
+        print(f"  [CODEX] could not write prompt temp file: {_e}")
+        return ""
+    ps_cmd = (f"Get-Content -Raw '{_tmp}' | codex exec --skip-git-repo-check "
+              f"-c 'model=\"{NARRATIVE_MODEL}\"'")
+    try:
+        proc = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps_cmd],
+                              capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        print(f"  [CODEX] timed out on LLM call ({NARRATIVE_MODEL})")
+        try:
+            os.remove(_tmp)
+        except Exception:
+            pass
+        return ""
+    try:
+        os.remove(_tmp)
+    except Exception:
+        pass
+    out = (proc.stdout or "").strip()
+    out = re.sub(r"^```[a-zA-Z]*\s*", "", out)
+    out = re.sub(r"\s*```$", "", out).strip()
+    return out
 POCKET_TTS_URL = os.environ.get("POCKET_TTS_URL", "http://127.0.0.1:8769")
 # Voice clones (Joe 2026-08-14): reuse Split Node's two clones instead of the
 # generic built-in 'marius'. The DECLARE/hook phase uses the announcement INTRO
@@ -259,6 +400,8 @@ def _hands_clause() -> str:
 
 # ---- LLM (gemma 4 uncensored via LM Studio) ------------------------
 def _llm_chat(messages, max_tokens=900, temp=0.8) -> str:
+    if LLM_PROVIDER == "codex":
+        return _codex_llm_chat(messages, max_tokens=max_tokens, temp=temp)
     data = json.dumps({
         "model": LLM_MODEL, "messages": messages,
         "max_tokens": max_tokens, "temperature": temp,
@@ -281,6 +424,8 @@ def _llm_reachable() -> bool:
     pass and then block on a 180s per-call timeout on every subsequent LLM call.
     A tiny chat call is the real liveness test.
     """
+    if LLM_PROVIDER == "codex":
+        return _codex_available()
     try:
         _payload = {"model": LLM_MODEL,
                     "messages": [{"role": "user", "content": "hi"}],
@@ -1887,6 +2032,9 @@ def run():
     print(f"  backend=image:{IMAGE_BACKEND}  video:{VIDEO_BACKEND}")
     print(f"  style={_active_style_name()}  target={int(TARGET_SECONDS)}s  max={int(MAX_SECONDS)}s")
     print("=" * 58)
+
+    # Pick the LLM backend + model (LM Studio loaded models, or Codex cheapest).
+    _select_llm()
 
     # Ask which mode: make Shorts from an existing Split Node episode, or the
     # normal RSS money-exploit flow (Joe 2026-08-14).
