@@ -2,6 +2,12 @@
 
 All notable changes to Split Node Shorts.
 
+## [1.5.9] - 2026-08-16
+
+### Fix: codex image grabbing determinism
+
+- Each codex image call now runs in its OWN isolated `CODEX_HOME` so its output lands in a unique `generated_images/` namespace - deterministic grabbing instead of racing over the shared `~/.codex/generated_images`. Joe 2026-08-16.
+
 ## [1.5.8] - 2026-08-16
 
 ### Arcane style simplified

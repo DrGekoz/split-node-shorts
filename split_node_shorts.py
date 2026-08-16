@@ -980,8 +980,37 @@ def _generate_image_codex(prompt, out_path, timeout=900):
     if not _codex_available():
         print("  [IMG] codex CLI not found on PATH - install with: npm install -g @openai/codex")
         return False
-    generated = Path.home() / ".codex" / "generated_images"
+    # Per-call CODEX_HOME isolation (Joe 2026-08-16): each codex call runs in
+    # its OWN fresh CODEX_HOME so its output lands in a unique
+    # generated_images/ namespace - deterministic grabbing under parallelism.
+    _user_home = Path.home() / ".codex"
+    _home = None
+    _env = None
+    try:
+        _home = Path(tempfile.gettempdir()) / f"codex_home_{uuid.uuid4().hex[:12]}"
+        _home.mkdir(parents=True, exist_ok=True)
+        for _f in ("auth.json", "config.toml"):
+            _src = _user_home / _f
+            if _src.is_file():
+                try:
+                    shutil.copy2(_src, _home / _f)
+                except Exception:
+                    pass
+        _env = dict(os.environ)
+        _env["CODEX_HOME"] = str(_home)
+        generated = _home / "generated_images"
+    except Exception:
+        _home = None
+        _env = None
+        generated = _user_home / "generated_images"
     generated.mkdir(parents=True, exist_ok=True)
+
+    def _cleanup_home():
+        if _home and _home.is_dir():
+            try:
+                shutil.rmtree(_home, ignore_errors=True)
+            except Exception:
+                pass
 
     def _snapshot() -> dict:
         m = {}
@@ -1000,13 +1029,15 @@ def _generate_image_codex(prompt, out_path, timeout=900):
     try:
         ps_cmd = f"Get-Content -Raw '{_tmp}' | codex exec --skip-git-repo-check"
         proc = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps_cmd],
-                              capture_output=True, text=True, timeout=timeout)
+                              capture_output=True, text=True, timeout=timeout,
+                              env=_env)
     except subprocess.TimeoutExpired:
         print("  [IMG] codex timed out generating image")
         try:
             os.remove(_tmp)
         except Exception:
             pass
+        _cleanup_home()
         return False
     try:
         os.remove(_tmp)
@@ -1046,11 +1077,13 @@ def _generate_image_codex(prompt, out_path, timeout=900):
         _t.sleep(1)
     if src is None:
         print("  [IMG] codex could not deterministically locate this call's output - retrying")
+        _cleanup_home()
         return False
     try:
         shutil.copy2(src, out_path)
     except Exception as e:
         print(f"  [IMG] codex copy failed: {e}")
+        _cleanup_home()
         return False
     try:
         os.remove(src)
@@ -1060,6 +1093,7 @@ def _generate_image_codex(prompt, out_path, timeout=900):
             pass
     except Exception:
         pass
+    _cleanup_home()
     return os.path.isfile(out_path) and os.path.getsize(out_path) > 1000
 
 
