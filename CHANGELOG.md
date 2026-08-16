@@ -2,6 +2,12 @@
 
 All notable changes to Split Node Shorts.
 
+## [1.5.10] - 2026-08-16
+
+### Fix: SA3 port prompt no longer hangs startup
+
+- `resolve_sa3_port` auto-detects a single live SA3 UI and uses it silently; if nothing is detected it no longer hard-blocks on a bare `input()` (a run could stall indefinitely waiting for a port that was never detected). Headless/redirected runs (cron, no console, piped stdin - or `SA3_HEADLESS=1`) skip straight to the static music pool; it only prompts when nothing is detected AND stdin is a real console. The startup call is also guarded by `MUSIC_BACKEND=sa3`, so static-pool runs never touch SA3. Joe 2026-08-16.
+
 ## [1.5.9] - 2026-08-16
 
 ### Fix: codex image grabbing determinism

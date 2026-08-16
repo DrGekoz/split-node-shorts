@@ -1921,8 +1921,9 @@ def run_from_episode():
     print("=" * 58)
     # SA3 opens on a different port each launch - resolve before any music.
     try:
-        import sa3_music
-        sa3_music.resolve_sa3_port(project="Split Node Shorts (episode)")
+        if os.environ.get("MUSIC_BACKEND", "sa3").strip().lower() == "sa3":
+            import sa3_music
+            sa3_music.resolve_sa3_port(project="Split Node Shorts (episode)")
     except Exception as e:
         print(f"  [SA3] port check skipped ({e}) - will fall back if music is needed")
     eps = _list_sn_episodes()
@@ -2090,8 +2091,9 @@ def run():
     # Ask which port Stable Audio 3 is running on BEFORE anything else
     # (SA3's Pinokio launcher opens on a different port each run).
     try:
-        import sa3_music
-        sa3_music.resolve_sa3_port(project="Split Node Shorts")
+        if os.environ.get("MUSIC_BACKEND", "sa3").strip().lower() == "sa3":
+            import sa3_music
+            sa3_music.resolve_sa3_port(project="Split Node Shorts")
     except Exception as e:
         print(f"  [SA3] port check skipped ({e}) - will fall back if music is needed")
 
