@@ -1354,6 +1354,106 @@ def _render_from_clips(shots, clips, output_path, total):
     print(f"  [OK] {_fmt(_audio_duration(output_path))} -> {output_path}")
     return output_path
 
+def _llm_music_prompt(story: str) -> str:
+    """Ask the local LLM to write a Stable Audio 3 music prompt for a
+    2-paragraph story beat. The prompt ends with an explicit BPM so the track's
+    tempo matches the scene. Falls back to a neutral underscore on LLM failure."""
+    if not story or not story.strip():
+        return "Tense documentary background music, suspenseful electronic score, no vocals, building tension, cinematic, 85 BPM"
+    try:
+        text = _llm_chat([
+            {"role": "system", "content": (
+                "You write music prompts for Stable Audio 3, a text-to-music model. "
+                "Given a short story beat (two narration paragraphs), write ONE "
+                "music prompt that matches the scene. Format: a short comma-separated "
+                "list of genre, mood, instruments and energy, ending with the tempo "
+                "as '<N> BPM' (pick a fitting tempo between 60 and 140). One sentence "
+                "only, under ~40 words. No labels, no quotes, no intro - just the "
+                "prompt.")},
+            {"role": "user", "content": story},
+        ], max_tokens=90, temp=0.7).strip().strip('"').strip()
+        if not text:
+            raise ValueError("empty")
+        if not re.search(r"\d+\s*BPM", text, re.I):
+            text = f"{text}, 85 BPM"
+        return text
+    except Exception:
+        return ("Tense documentary background music, suspenseful electronic "
+                "score, no vocals, building tension, cinematic, 85 BPM")
+
+
+def _build_adaptive_music_segments(shots, voice_dur, tmpdir):
+    """One SA3 music segment per 2 narration shots, timed to each pair's window
+    on the concat timeline, LLM prompt (with BPM), assembled into a full-length
+    bed. Returns the bed WAV path (at -10dB) or None on failure."""
+    import sa3_music
+    if not sa3_music.available():
+        print("  [AUDIO] SA3 not ready - using single bed / voice only")
+        return None
+    starts, cur = [], 0.0
+    for s in shots:
+        starts.append(cur)
+        cur += max(_audio_duration(s["tts"]), 0.0)
+    pairs = []
+    n = len(shots)
+    i = 0
+    while i < n:
+        j = min(i + 2, n)
+        start = starts[i]
+        end = starts[j] if j < n else voice_dur
+        dur = max(end - start, 1.0)
+        story = " ".join(
+            (s.get("spoken") or s.get("text") or "").strip() for s in shots[i:j])
+        pairs.append((start, dur, story))
+        i = j
+    seg_paths, gen_ok = [], 0
+    total = len(pairs)
+    bar = None
+    try:
+        from tqdm import tqdm as _tqdm
+        bar = _tqdm(total=total, desc="SA3 music", unit="seg", leave=False)
+    except Exception:
+        bar = None
+    for k, (start, dur, story) in enumerate(pairs):
+        prompt = _llm_music_prompt(story)
+        out = os.path.join(tmpdir, f"music_pair_{k:03d}.wav")
+        ok = sa3_music.generate_via_gradio(prompt, dur, out, story_context=story)
+        if ok and os.path.isfile(out) and os.path.getsize(out) > 1000:
+            seg_paths.append((out, start))
+            gen_ok += 1
+        if bar:
+            bar.update(1)
+    if bar:
+        bar.close()
+    if not seg_paths:
+        print(f"  [AUDIO] adaptive bed: 0/{total} segments - single bed / voice only")
+        return None
+    print(f"  [AUDIO] adaptive bed: {gen_ok}/{total} 2-paragraph segments generated")
+    inputs, fparts, labels = [], [], []
+    for k, (path, start) in enumerate(seg_paths):
+        inputs += ["-i", path]
+        d = int(round(start * 1000))
+        fparts.append(f"[{k}:a]aresample=44100,adelay={d}|{d}[s{k}]")
+        labels.append(f"[s{k}]")
+    fscript = os.path.join(tmpdir, "music_adaptive_filter.txt")
+    with open(fscript, "w") as f:
+        f.write(";".join(fparts) + ";" + "".join(labels) +
+                f"amix=inputs={len(labels)}:duration=longest:normalize=0,"
+                f"atrim=0:{voice_dur:.2f},"
+                f"afade=t=in:st=0:d=0.5,"
+                f"volume=-10dB[out]")
+    bed = os.path.join(tmpdir, "bed_adaptive.wav")
+    r = subprocess.run(
+        ["ffmpeg", "-y", "-v", "error"] + inputs +
+        ["-filter_complex_script", fscript, "-map", "[out]",
+         "-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2", bed],
+        capture_output=True, text=True, timeout=300)
+    if r.returncode == 0 and os.path.isfile(bed) and os.path.getsize(bed) > 1000:
+        return bed
+    print(f"  [AUDIO] adaptive bed assemble failed: {r.stderr[-200:]}")
+    return None
+
+
 def _build_audio(shots):
     """Concatenate TTS clips -> a single mix WAV. Returns path or None.
 
@@ -1383,20 +1483,26 @@ def _build_audio(shots):
             if sa3_music.available():
                 tmpdir = tempfile.mkdtemp(prefix="sns_bed_")
                 try:
-                    bed = os.path.join(tmpdir, "bed.wav")
-                    prompt = os.environ.get(
-                        "SN_SA3_BED_PROMPT",
-                        "Tense documentary background music, suspenseful electronic "
-                        "score, no vocals, building tension, cinematic, high quality production")
-                    # Resident-model gen (chunked @380s internally); base music at -10dB.
-                    # Story-adaptive: build prompt from the actual scene script so the
-                    # bed follows what's happening in the short (Joe 2026-08-14).
-                    story = " ".join(
-                        s.get("spoken", "") or s.get("text", "") or ""
-                        for s in shots if (s.get("spoken") or s.get("text")))
-                    if sa3_music.generate_via_gradio(prompt, voice_dur, bed,
-                                                     timeout=1800,
-                                                     story_context=story):
+                    # Per-2-paragraph adaptive bed first (Joe 2026-08-16).
+                    bed = _build_adaptive_music_segments(shots, voice_dur, tmpdir)
+                    if bed and os.path.isfile(bed):
+                        print(f"  [AUDIO] adaptive per-2-paragraph music bed ready "
+                              f"({voice_dur:.0f}s, -10dB base)")
+                    else:
+                        bed = os.path.join(tmpdir, "bed.wav")
+                        prompt = os.environ.get(
+                            "SN_SA3_BED_PROMPT",
+                            "Tense documentary background music, suspenseful electronic "
+                            "score, no vocals, building tension, cinematic, high quality production")
+                        story = " ".join(
+                            s.get("spoken", "") or s.get("text", "") or ""
+                            for s in shots if (s.get("spoken") or s.get("text")))
+                        ok = sa3_music.generate_via_gradio(prompt, voice_dur, bed,
+                                                           timeout=1800,
+                                                           story_context=story)
+                        if not ok or not (os.path.isfile(bed) and os.path.getsize(bed) > 1000):
+                            bed = None
+                    if bed and os.path.isfile(bed):
                         mix = ["ffmpeg", "-y",
                                "-i", voice,
                                "-i", bed,
