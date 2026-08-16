@@ -159,7 +159,8 @@ def _codex_llm_chat(messages, max_tokens=900, temp=0.8) -> str:
     Mirrors _llm_chat's contract (returns text, or '' on failure) so callers'
     retry/fallback logic is untouched. System+user messages combined into ONE
     prompt and piped to codex on stdin via a temp file (the ep014 PowerShell
-    arg-length fix)."""
+    arg-length fix). Uses per-call CODEX_HOME isolation + one retry + surfaced
+    stderr (Joe 2026-08-16), mirroring Split Node / Crayon Lore."""
     if not _codex_available():
         print("  [CODEX] codex CLI not found on PATH - falling back to LM Studio")
         return ""
@@ -170,7 +171,31 @@ def _codex_llm_chat(messages, max_tokens=900, temp=0.8) -> str:
     prompt = f"{sys_p}\n\n{user_p}".strip() if sys_p else user_p
     if not prompt:
         return ""
-    import tempfile, uuid, subprocess
+    import tempfile, uuid, subprocess, shutil
+    # Per-call CODEX_HOME isolation so concurrent codex calls (imagegen pool)
+    # don't contend with this one on the shared ~/.codex.
+    _user_home = Path.home() / ".codex"
+    _home = None
+    _env = dict(os.environ)
+    try:
+        _home = Path(tempfile.gettempdir()) / f"codex_llm_home_{uuid.uuid4().hex[:12]}"
+        _home.mkdir(parents=True, exist_ok=True)
+        for _f in ("auth.json", "config.toml"):
+            _src = _user_home / _f
+            if _src.is_file():
+                try:
+                    shutil.copy2(_src, _home / _f)
+                except Exception:
+                    pass
+        _env["CODEX_HOME"] = str(_home)
+    except Exception:
+        _home = None
+    def _cleanup_home():
+        if _home and _home.is_dir():
+            try:
+                shutil.rmtree(_home, ignore_errors=True)
+            except Exception:
+                pass
     _tmp = os.path.join(tempfile.gettempdir(),
                         f"codex_llm_{uuid.uuid4().hex[:8]}.txt")
     try:
@@ -178,27 +203,39 @@ def _codex_llm_chat(messages, max_tokens=900, temp=0.8) -> str:
             _f.write(prompt)
     except Exception as _e:
         print(f"  [CODEX] could not write prompt temp file: {_e}")
+        _cleanup_home()
         return ""
     ps_cmd = (f"Get-Content -Raw '{_tmp}' | codex exec --skip-git-repo-check "
               f"-c 'model=\"{NARRATIVE_MODEL}\"'")
-    try:
-        proc = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps_cmd],
-                              capture_output=True, text=True, timeout=300)
-    except subprocess.TimeoutExpired:
-        print(f"  [CODEX] timed out on LLM call ({NARRATIVE_MODEL})")
+    last_err = ""
+    for attempt in (1, 2):
         try:
-            os.remove(_tmp)
-        except Exception:
-            pass
-        return ""
-    try:
-        os.remove(_tmp)
-    except Exception:
-        pass
-    out = (proc.stdout or "").strip()
-    out = re.sub(r"^```[a-zA-Z]*\s*", "", out)
-    out = re.sub(r"\s*```$", "", out).strip()
-    return out
+            proc = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps_cmd],
+                                  capture_output=True, text=True, timeout=420,
+                                  env=_env)
+        except subprocess.TimeoutExpired:
+            print(f"  [CODEX] timed out on LLM call ({NARRATIVE_MODEL}, "
+                  f"attempt {attempt}/2)")
+            last_err = "timeout"
+            continue
+        finally:
+            try:
+                os.remove(_tmp)
+            except Exception:
+                pass
+        out = (proc.stdout or "").strip()
+        out = re.sub(r"^```[a-zA-Z]*\s*", "", out)
+        out = re.sub(r"\s*```$", "", out).strip()
+        if proc.returncode == 0 and out:
+            _cleanup_home()
+            return out
+        last_err = (f"rc={proc.returncode} "
+                    f"err={(proc.stderr or '').strip()[:200]!r}")
+        if attempt == 1:
+            print(f"  [CODEX] LLM call failed ({last_err}) - retrying once...")
+    _cleanup_home()
+    print(f"  [CODEX] LLM call failed ({last_err}) - falling back to LM Studio")
+    return ""
 POCKET_TTS_URL = os.environ.get("POCKET_TTS_URL", "http://127.0.0.1:8769")
 # Voice clones (Joe 2026-08-14): reuse Split Node's two clones instead of the
 # generic built-in 'marius'. The DECLARE/hook phase uses the announcement INTRO
@@ -401,13 +438,21 @@ def _llm_chat(messages, max_tokens=900, temp=0.8) -> str:
     }).encode()
     req = urllib.request.Request(LM_STUDIO_URL, data=data,
                                  headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=180) as r:
-            result = json.loads(r.read())
-        return result["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        print(f"  [LLM error] {e}")
-        return ""
+    # Bumped timeout 180s -> 420s + one retry (Joe 2026-08-16): when the codex
+    # imagegen pool / upscaler runs on the SAME GPU, LM Studio inference crawls
+    # and a shot prompt can exceed 180s -> aborts mid-gen -> slow retry/fallback.
+    last_err = ""
+    for attempt in (1, 2):
+        try:
+            with urllib.request.urlopen(req, timeout=420) as r:
+                result = json.loads(r.read())
+            return result["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            last_err = str(e)
+            if attempt == 1:
+                print(f"  [LLM error] {e} - retrying once (GPU contention?)")
+    print(f"  [LLM error] {last_err}")
+    return ""
 
 def _llm_reachable() -> bool:
     """Liveness probe of LM Studio (ported from Split Node 2026-08-09).
